@@ -137,7 +137,7 @@ func setupCustom(p model.Provider) int {
 	key = strings.TrimSpace(key)
 
 	p.BaseURL = url
-	return validateAndSave(p, key, url)
+	return validateAndSave(p, key, url, "")
 }
 
 func setupHosted(p model.Provider, cfg config.Config) int {
@@ -166,13 +166,15 @@ func setupHosted(p model.Provider, cfg config.Config) int {
 		fmt.Fprintln(os.Stderr, "  no key given")
 		return 2
 	}
-	return validateAndSave(p, key, "")
+	return validateAndSave(p, key, "", "")
 }
 
 // validateAndSave is the step that makes setup worth running: it proves the key
 // works and asks the provider which model to use, so nothing is hardcoded and
 // nothing is discovered later at the worst possible moment.
-func validateAndSave(p model.Provider, key, baseURL string) int {
+// preferID, when set, is a model the caller explicitly asked for: validate the
+// key but do not second-guess their choice.
+func validateAndSave(p model.Provider, key, baseURL, preferID string) int {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -186,15 +188,21 @@ func validateAndSave(p model.Provider, key, baseURL string) int {
 	}
 	fmt.Println("works")
 
-	fmt.Print("  Picking a model...  ")
-	chosen, err := c.Discover(ctx)
-	if err != nil || chosen == "" {
-		// Not fatal: the key is good, so fall back to the provider's default
-		// rather than making the user start over.
-		chosen = p.Fallback
-		fmt.Printf("%s (default)\n", chosen)
+	chosen := preferID
+	if chosen != "" {
+		fmt.Printf("  Using model...      %s (your choice)\n", chosen)
 	} else {
-		fmt.Println(chosen)
+		fmt.Print("  Picking a model...  ")
+		discovered, derr := c.Discover(ctx)
+		if derr != nil || discovered == "" {
+			// Not fatal: the key is good, so fall back to the provider's
+			// default rather than making the user start over.
+			chosen = p.Fallback
+			fmt.Printf("%s (default)\n", chosen)
+		} else {
+			chosen = discovered
+			fmt.Println(chosen)
+		}
 	}
 
 	spec := p.Name + "/" + chosen

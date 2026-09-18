@@ -454,6 +454,17 @@ func modelCmd(args []string) int {
 		apiKey = args[1]
 	}
 
+	p, _ := model.Lookup(name)
+	_, explicitID, _ := strings.Cut(spec, "/")
+
+	// A hosted provider with a key goes through exactly the same check as
+	// `amnesia setup`: prove the key works and pin a model the key can actually
+	// use. Two paths to the same setting must not behave differently, or the
+	// scriptable one becomes the one that silently saves a bad key.
+	if !p.Local && p.EnvKey != "" && apiKey != "" {
+		return validateAndSave(p, apiKey, cfg.BaseURL, explicitID)
+	}
+
 	path, err := config.Save(spec, apiKey, cfg.BaseURL, -1)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "amnesia:", err)
