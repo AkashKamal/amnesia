@@ -1,0 +1,36 @@
+version: 2
+project_name: amnesia
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - main: ./cmd/amnesia
+    binary: amnesia
+    env: [CGO_ENABLED=0]   # the whole distribution story depends on this
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+archives:
+  - formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files: [README.md, LICENSE, NOTICE]
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude: ["^docs:", "^test:", "^ci:"]
+
+release:
+  footer: |
+    Verify your download against `checksums.txt` before running it.

@@ -1,0 +1,73 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+      - run: go build ./...
+      - run: go test ./... -race
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - run: go vet ./...
+
+  # The resolve path is the latency budget. It must not reach anything that
+  # opens a file or a socket at startup, and that erodes one innocent import at
+  # a time unless something checks.
+  import-budget:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: resolve must not reach storage, network or the daemon
+        run: |
+          bad=$(go list -deps ./internal/resolve | grep -E 'amnesia/internal/(store|model|daemon|mcpsrv)' || true)
+          if [ -n "$bad" ]; then echo "resolve pulled in:"; echo "$bad"; exit 1; fi
+      - name: amnesia must have no external module dependencies
+        run: |
+          ext=$(go list -deps ./... | grep -E '^[^/]+\.[^/]+/' | grep -v '^github.com/AkashKamal/amnesia' || true)
+          if [ -n "$ext" ]; then echo "unexpected external dependency:"; echo "$ext"; exit 1; fi
+
+  # The committed corpus is generated. This proves the generator still produces
+  # exactly what is checked in, so a stale or hand-edited TSV fails review.
+  corpus-reproducible:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: git clone --depth 1 https://github.com/tldr-pages/tldr /tmp/tldr
+      - run: go run ./tools/corpus-gen -tldr /tmp/tldr -out /tmp/commands.tsv
+      - name: report drift
+        run: |
+          if ! diff -q internal/corpus/data/commands.tsv /tmp/commands.tsv >/dev/null; then
+            echo "::notice::corpus drifted from upstream tldr-pages; run make corpus"
+            diff internal/corpus/data/commands.tsv /tmp/commands.tsv | head -40 || true
+          fi

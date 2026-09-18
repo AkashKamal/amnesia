@@ -1,0 +1,45 @@
+common	git	amend last commit message	git commit --amend	Rewrite the most recent commit
+common	docker	build image from dockerfile	docker build -t <name>:<tag> .	Build an image from the Dockerfile in the current directory
+common	df	check disk usage	df -h	Show free disk space, human readable
+common	ffmpeg	convert video mp4	ffmpeg -i <input> -c:v libx264 -c:a aac <output>.mp4	Transcode to H.264/AAC in an MP4 container
+common	kubectl	describe pod	kubectl describe pod <pod>	Show events and state for a pod
+common	git	discard all local changes	git reset --hard HEAD	Throw away every uncommitted change
+common	curl	download file	curl -fLO <url>	Download preserving the remote filename
+common	ffmpeg	extract audio from video	ffmpeg -i <input> -vn -c:a copy <output>.m4a	Copy the audio stream out without re-encoding
+common	tar	extract tar gz archive	tar -xzf <archive>.tar.gz	Unpack a gzip-compressed tarball
+linux	du	find biggest directories	du -h --max-depth=1 . | sort -rh | head -20	Largest subdirectories under the current path
+osx	du	find biggest directories	du -h -d 1 . | sort -rh | head -20	Largest subdirectories under the current path
+common	find	find files larger than 100mb	find . -type f -size +100M	Locate large files under the current directory
+linux	ps	find process using port	ss -tulpn | grep :<port>	Identify the process bound to a port
+common	docker	follow container logs	docker logs -f <container>	Stream logs from a container
+common	kubectl	follow pod logs	kubectl logs -f <pod>	Stream logs from a pod
+common	docker	free disk space used by docker	docker system df	Report docker disk usage
+linux	kill	kill process on port	fuser -k <port>/tcp	Terminate whatever holds a TCP port
+common	docker	list all containers	docker ps -a	Show all containers including stopped
+common	git	list branches sorted by date	git branch --sort=-committerdate	Branches, most recently committed first
+common	docker	list images	docker images	Show local images
+common	kubectl	list pods	kubectl get pods	List pods in the current namespace
+common	kubectl	list pods in all namespaces	kubectl get pods -A	List pods across every namespace
+common	docker	list running containers	docker ps	Show running containers
+common	ffmpeg	make gif from video	ffmpeg -i <input> -vf fps=12,scale=640:-1 <output>.gif	Convert a clip to an animated GIF
+common	kubectl	port forward pod	kubectl port-forward pod/<pod> 8080:80	Forward a local port to a pod
+common	docker	remove all stopped containers	docker container prune	Delete stopped containers
+common	docker	remove unused images and volumes	docker system prune -a --volumes	Reclaim space; deletes unused images, networks and volumes
+common	ffmpeg	resize video 720p	ffmpeg -i <input> -vf scale=-2:720 <output>	Scale height to 720 keeping aspect ratio
+common	kubectl	restart deployment	kubectl rollout restart deployment/<name>	Roll pods of a deployment
+common	grep	search text in files recursively	grep -rn <pattern> .	Recursive search with line numbers
+common	docker	shell into container	docker exec -it <container> sh	Open an interactive shell in a running container
+common	kubectl	shell into pod	kubectl exec -it <pod> -- sh	Open a shell in a running pod
+common	docker	show container resource usage	docker stats	Live CPU and memory per container
+common	kubectl	show current context	kubectl config current-context	Print the active cluster context
+linux	systemctl	show failed services	systemctl --failed	List units in a failed state
+linux	ss	show listening ports	ss -tulpn	TCP and UDP sockets with owning process
+osx	lsof	show listening ports	lsof -iTCP -sTCP:LISTEN -n -P	TCP sockets in LISTEN state
+common	kubectl	show node resource usage	kubectl top nodes	CPU and memory per node
+common	git	show what changed	git status	Show working tree status
+common	git	stash including untracked	git stash -u	Stash tracked and untracked changes
+common	kubectl	switch namespace	kubectl config set-context --current --namespace=<ns>	Change the default namespace
+linux	journalctl	tail system logs	journalctl -f	Follow the systemd journal
+common	ffmpeg	trim video without reencoding	ffmpeg -ss 00:00:10 -to 00:00:30 -i <input> -c copy <output>	Cut a clip by copying streams
+common	kubectl	undo deployment	kubectl rollout undo deployment/<name>	Roll back to the previous revision
+common	git	undo last commit keep changes	git reset --soft HEAD~1	Remove the last commit but keep the work staged

@@ -1,0 +1,19 @@
+Amnesia
+Copyright 2026 Akash Kamal R
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+--------------------------------------------------------------------------------
+
+This product includes data derived from tldr-pages.
+
+  https://github.com/tldr-pages/tldr
+  Copyright (c) the tldr-pages contributors
+  Licensed under the Creative Commons Attribution 4.0 International License
+  (CC-BY-4.0): https://creativecommons.org/licenses/by/4.0/
+
+The file internal/corpus/data/commands.tsv is generated from tldr-pages command
+descriptions and examples by tools/corpus-gen, and is redistributed under
+CC-BY-4.0. Modifications: descriptions are lowercased and normalized into lookup
+phrases, {{placeholders}} are rewritten as <placeholders>, and pages for
+platforms other than common/linux/osx/windows are omitted.

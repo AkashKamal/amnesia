@@ -1,0 +1,7 @@
+/amnesia
+/amnesia.exe
+/dist/
+*.test
+*.out
+.DS_Store
+/.gotmp/
