@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AkashKamal/amnesia/internal/config"
 	"github.com/AkashKamal/amnesia/internal/corpus"
 	"github.com/AkashKamal/amnesia/internal/model"
 	"github.com/AkashKamal/amnesia/internal/resolve"
@@ -40,9 +41,18 @@ const usage = `amnesia - natural language to shell commands, offline first
 
 usage:
   amnesia <what you want to do>     resolve a command and confirm before running
-  amnesia doctor                    show what amnesia detected about this machine
+  amnesia model [spec] [api-key]    show or set the model used when the corpus misses
+  amnesia doctor                    show what amnesia detected, and what to fix
   amnesia forget                    delete everything amnesia has cached
   amnesia version                   print the version
+
+setup:
+  amnesia works with no setup at all; the built-in corpus is offline.
+  For the questions it cannot answer, point it at a model:
+
+  amnesia model ollama                                  free, local, auto-detected
+  amnesia model groq/llama-3.3-70b-versatile <api-key>  hosted
+  amnesia model none                                    corpus only
 
 flags:
   --offline     never call a model; corpus and cache only
@@ -51,11 +61,13 @@ flags:
   --no-cache    do not read or write the learned cache
 
 environment:
+  all optional, and they override the config file
   AMNESIA_MODEL      provider[/model], e.g. groq/llama-3.3-70b-versatile, ollama
   AMNESIA_API_KEY    key for the chosen provider (or GROQ_API_KEY, OPENAI_API_KEY, ...)
-  AMNESIA_BASE_URL   override the provider endpoint
+  AMNESIA_BASE_URL   any OpenAI-compatible endpoint (LM Studio, llama.cpp, vLLM)
+  AMNESIA_TIMEOUT    e.g. 5m, for a slow local model
   AMNESIA_OFFLINE    set to anything to force offline
-  AMNESIA_HOME       where to keep the cache
+  AMNESIA_HOME       where to keep the config and cache
 `
 
 type options struct {
@@ -104,6 +116,8 @@ func run() int {
 	switch args[0] {
 	case "doctor":
 		return doctor(opt)
+	case "model", "setup":
+		return modelCmd(args[1:])
 	case "forget":
 		return forget()
 	case "daemon", "mcp", "recall", "service":
@@ -128,8 +142,14 @@ func resolveAndRun(query string, opt options) int {
 		}
 	}
 	if !opt.offline {
-		if m := model.New(); m != nil {
+		if m := model.New(config.Load()); m != nil {
 			r.Model = m
+			r.OnModelCall = func(name string) {
+				if opt.asJSON {
+					return // never contaminate machine-readable output
+				}
+				fmt.Fprintf(os.Stderr, "  %s\n", dim("asking "+name+" - a local model can take a moment to load"))
+			}
 		}
 	}
 
@@ -137,8 +157,12 @@ func resolveAndRun(query string, opt options) int {
 	if err != nil {
 		if errors.Is(err, resolve.ErrNoMatch) {
 			fmt.Fprintf(os.Stderr, "amnesia: no command found for %q\n", query)
-			if r.Model == nil {
-				fmt.Fprintln(os.Stderr, "  running offline - set AMNESIA_MODEL or start Ollama to ask a model")
+			if r.Model == nil && !opt.offline {
+				// The most common reason amnesia cannot answer is that nobody
+				// ever told it about a model. Say so here, where it matters,
+				// rather than making the user go looking.
+				fmt.Fprintln(os.Stderr, "  no model configured, so this is corpus-only.")
+				fmt.Fprintln(os.Stderr, "  run `amnesia model` to set one up (a local one is free).")
 			}
 			return 1
 		}
@@ -282,23 +306,143 @@ func printJSON(results []resolve.Result) int {
 
 func doctor(opt options) int {
 	env := detectEnv()
-	fmt.Printf("amnesia %s\n", version)
+	cfg := config.Load()
+
+	fmt.Printf("amnesia %s\n\n", version)
 	fmt.Printf("  platform    %s (GOOS=%s)\n", env.Platform, runtime.GOOS)
 	fmt.Printf("  shell       %s\n", env.Shell)
-	fmt.Printf("  corpus      %d commands, embedded\n", corpus.Len())
-
-	if opt.offline {
-		fmt.Printf("  model       disabled (--offline)\n")
-	} else if m := model.New(); m != nil {
-		fmt.Printf("  model       %s\n", m.Name())
-	} else {
-		fmt.Printf("  model       none - offline. Set AMNESIA_MODEL or run Ollama.\n")
-	}
-
+	fmt.Printf("  corpus      %d commands, built in\n", corpus.Len())
+	fmt.Printf("  config      %s\n", cfg.Path)
 	if c, err := store.Open(); err == nil {
 		fmt.Printf("  cache       %s\n", c.Path())
 	}
+
+	fmt.Println()
+	if opt.offline {
+		fmt.Println("  model       disabled by --offline")
+		fmt.Println()
+		fmt.Println("amnesia works offline. The model is only consulted when the built-in")
+		fmt.Println("corpus has no answer.")
+		return 0
+	}
+
+	st := model.Describe(cfg)
+	if st.Ready {
+		fmt.Printf("  model       %s/%s  (%s)\n", st.Provider, st.Model, origin(st.Origin))
+		if cfg.APIKey != "" {
+			fmt.Printf("  api key     %s  (%s)\n", config.MaskKey(cfg.APIKey), cfg.APIKeyFrom)
+		}
+		fmt.Println()
+		fmt.Println("Everything is set up. amnesia answers offline first, and only asks the")
+		fmt.Println("model when the corpus does not know.")
+		return 0
+	}
+
+	fmt.Println("  model       none  (offline only)")
+	fmt.Println()
+	fmt.Println("amnesia still works: the corpus answers most questions with no model at all.")
+	fmt.Println("To also handle the ones it does not know:")
+	fmt.Println()
+	if st.Hint != "" {
+		fmt.Printf("  %s\n\n", st.Hint)
+	}
+	fmt.Print(setupHelp)
 	return 0
+}
+
+func origin(o config.Origin) string {
+	if o == "" {
+		return "detected"
+	}
+	return string(o)
+}
+
+const setupHelp = `  Free and private, on your own machine:
+      1. install Ollama          https://ollama.com/download
+      2. ollama pull llama3.2:1b (~1.3 GB, and any chat model works)
+      3. nothing else - amnesia finds a running Ollama by itself
+
+  Or a hosted provider, nothing to download:
+      amnesia model groq/llama-3.3-70b-versatile <api-key>
+
+  Providers: ollama, groq, deepseek, openai, openrouter, together, custom
+  "custom" plus AMNESIA_BASE_URL covers LM Studio, llama.cpp, vLLM and friends.
+
+  Run "amnesia model" any time to see or change this.
+`
+
+// modelCmd is the whole setup story: show what is configured, or set it.
+//
+// It writes a config file so a provider is configured once, rather than
+// exporting environment variables into every shell the user ever opens - which
+// on Windows is a genuinely unpleasant thing to ask of someone, and is the main
+// reason a CLI like this gets abandoned during setup.
+func modelCmd(args []string) int {
+	cfg := config.Load()
+
+	if len(args) == 0 {
+		st := model.Describe(cfg)
+		if st.Ready {
+			fmt.Printf("using %s/%s (%s)\n", st.Provider, st.Model, origin(st.Origin))
+		} else {
+			fmt.Println("no model configured - amnesia is answering offline only")
+			if st.Hint != "" {
+				fmt.Printf("\n  %s\n", st.Hint)
+			}
+		}
+		fmt.Println()
+		fmt.Print(setupHelp)
+		fmt.Printf("\n  config file: %s\n", cfg.Path)
+		return 0
+	}
+
+	spec := args[0]
+	if spec == "none" || spec == "off" {
+		if err := config.Clear(); err != nil {
+			fmt.Fprintln(os.Stderr, "amnesia:", err)
+			return 1
+		}
+		fmt.Println("cleared. amnesia will answer offline only.")
+		return 0
+	}
+
+	name, _, _ := strings.Cut(spec, "/")
+	if !knownProvider(name) {
+		fmt.Fprintf(os.Stderr, "amnesia: unknown provider %q\n  known: %s\n",
+			name, strings.Join(model.Names(), ", "))
+		return 2
+	}
+
+	apiKey := cfg.APIKey // keep an existing key when only the model changes
+	if len(args) > 1 {
+		apiKey = args[1]
+	}
+
+	path, err := config.Save(spec, apiKey, cfg.BaseURL)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "amnesia:", err)
+		return 1
+	}
+	fmt.Printf("saved to %s\n", path)
+
+	// Report what that actually resolves to. A typo or a missing key should
+	// surface now, not the next time the corpus happens to miss.
+	st := model.Describe(config.Load())
+	if st.Ready {
+		fmt.Printf("using %s/%s\n", st.Provider, st.Model)
+		return 0
+	}
+	fmt.Fprintf(os.Stderr, "\nnot usable yet:\n  %s\n", st.Hint)
+	return 1
+}
+
+func knownProvider(name string) bool {
+	for _, n := range model.Names() {
+		if n == name {
+			return true
+		}
+	}
+	return false
 }
 
 func forget() int {

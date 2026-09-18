@@ -103,6 +103,12 @@ type Resolver struct {
 	// instead of confirming a command.
 	MaxResults int
 
+	// OnModelCall is invoked just before the model stage runs, with the model's
+	// name. A cold local model can take a minute to load, and a CLI that prints
+	// nothing for a minute looks hung rather than busy. Optional; resolve stays
+	// free of any opinion about how to display it.
+	OnModelCall func(name string)
+
 	// HasTool reports whether an executable is on PATH. nil means "assume yes",
 	// which is what tests want; New wires up the real check.
 	//
@@ -208,6 +214,9 @@ func (r *Resolver) Resolve(ctx context.Context, query string) ([]Result, error) 
 			return r.finish(best, start), nil
 		}
 		return nil, ErrNoMatch
+	}
+	if r.OnModelCall != nil {
+		r.OnModelCall(r.Model.Name())
 	}
 	out, err := r.Model.Suggest(ctx, query, r.Env)
 	if err != nil || len(out) == 0 {

@@ -63,7 +63,8 @@ packaging.</sub>
 
 ```sh
 amnesia <what you want to do>     # resolve, show, confirm, run
-amnesia doctor                    # what amnesia detected about this machine
+amnesia model [spec] [api-key]    # show or set the model used when the corpus misses
+amnesia doctor                    # what amnesia detected, and what to fix
 amnesia forget                    # delete everything amnesia has cached
 ```
 
@@ -98,29 +99,54 @@ Three rules, no exceptions:
   and ranks what you can actually run first, then tells you plainly when the
   best answer needs something you haven't installed.
 
-## Using a model (optional)
+## Optional: a model for the questions the corpus can't answer
 
-Amnesia is fully useful with no model at all. If you want the fallback:
+Amnesia is useful with no model at all — the corpus is offline and answers most
+things. For the rest, point it at a model **once**:
 
 ```sh
-# local, free, private - amnesia finds it automatically if it's running
-ollama serve
-
-# or any hosted provider
-export GROQ_API_KEY=gsk_...
-export AMNESIA_MODEL=groq/llama-3.3-70b-versatile
+amnesia model                 # shows what you have, and every way to set it up
 ```
 
-Ollama, Groq, DeepSeek, OpenAI, OpenRouter and Together work out of the box;
-anything OpenAI-compatible works via `AMNESIA_BASE_URL`.
+**Free and private, on your own machine.** Install
+[Ollama](https://ollama.com/download), pull any chat model, and amnesia finds it
+by itself — no configuration:
+
+```sh
+ollama pull llama3.2:1b       # ~1.3 GB. Small is good here: this task is easy,
+                              # and a 1B model answers in a second.
+```
+
+> Amnesia asks Ollama what you have installed and uses the smallest one. It never
+> assumes a model name, so it works whatever you happen to have pulled.
+
+**Or a hosted provider**, nothing to download:
+
+```sh
+amnesia model groq/llama-3.3-70b-versatile gsk_your_key_here
+```
+
+Saved to a config file, so you set it once instead of exporting environment
+variables into every shell. `amnesia model none` turns it back off.
+
+Works with **ollama, groq, deepseek, openai, openrouter, together**, and
+`custom` + `AMNESIA_BASE_URL` for anything else that speaks the OpenAI API —
+LM Studio, llama.cpp, vLLM, LiteLLM. Anything on `localhost` automatically gets
+a long timeout, because a cold local model can take a minute to load.
+
+<details>
+<summary>Environment variables (all optional, and they override the config file)</summary>
 
 | | |
 |---|---|
 | `AMNESIA_MODEL` | `provider[/model]`, e.g. `ollama`, `groq/llama-3.3-70b-versatile` |
 | `AMNESIA_API_KEY` | key for the chosen provider (or `GROQ_API_KEY`, …) |
-| `AMNESIA_BASE_URL` | point at any OpenAI-compatible endpoint |
+| `AMNESIA_BASE_URL` | any OpenAI-compatible endpoint |
+| `AMNESIA_TIMEOUT` | e.g. `5m`, for a slow local model |
 | `AMNESIA_OFFLINE` | set to anything to force offline |
-| `AMNESIA_HOME` | where the cache lives |
+| `AMNESIA_HOME` | where the config and cache live |
+
+</details>
 
 ## Your data stays on your machine
 
@@ -129,7 +155,10 @@ anything OpenAI-compatible works via `AMNESIA_BASE_URL`.
 - The cache is a plain JSONL file you can read, grep and delete. `amnesia doctor`
   prints the path; `amnesia forget` empties it.
 - Your query only ever leaves the machine on a corpus **miss**, and only to the
-  provider you configured.
+  provider you configured. Amnesia tells you before it does: it prints which
+  model it is asking.
+- The config file is `0600` and `amnesia doctor` masks your API key, because
+  config output ends up in bug reports and screen shares.
 
 ## Roadmap
 
