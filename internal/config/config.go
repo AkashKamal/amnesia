@@ -20,6 +20,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -40,6 +41,12 @@ type Config struct {
 	Model   string
 	APIKey  string
 	BaseURL string
+
+	// MinConfidence is how sure the corpus must be before amnesia answers from
+	// it instead of asking the model. Zero means "unset, use the built-in
+	// default". Raising it buys accuracy with latency and API calls; lowering
+	// it does the reverse. Measured against stress/queries.txt.
+	MinConfidence float64
 
 	ModelFrom  Origin
 	APIKeyFrom Origin
@@ -79,6 +86,9 @@ func Load() Config {
 	if c.Path != "" {
 		if kv, err := readFile(c.Path); err == nil {
 			c.Model, c.APIKey, c.BaseURL = kv["model"], kv["api_key"], kv["base_url"]
+			if v, err := strconv.ParseFloat(kv["min_confidence"], 64); err == nil {
+				c.MinConfidence = v
+			}
 			if c.Model != "" {
 				c.ModelFrom = FromFile
 			}
@@ -96,6 +106,9 @@ func Load() Config {
 	}
 	if v := os.Getenv("AMNESIA_BASE_URL"); v != "" {
 		c.BaseURL = v
+	}
+	if v, err := strconv.ParseFloat(os.Getenv("AMNESIA_MIN_CONFIDENCE"), 64); err == nil {
+		c.MinConfidence = v
 	}
 	return c
 }
@@ -123,11 +136,18 @@ func readFile(p string) (map[string]string, error) {
 	return kv, sc.Err()
 }
 
-// Save writes model, key and base URL. It rewrites the whole file rather than
-// patching it: three settings, and a partial write is worse than a clean one.
+// Save writes the configuration.
 //
-// The file is 0600 and the directory 0700 because it can hold an API key.
-func Save(model, apiKey, baseURL string) (string, error) {
+// It rewrites the whole file rather than patching it: a handful of settings,
+// and a partial write is worse than a clean one. The file is 0600 and the
+// directory 0700 because it can hold an API key.
+//
+// A negative minConfidence means "keep whatever is already there", so changing
+// provider does not silently reset a threshold the user tuned.
+func Save(model, apiKey, baseURL string, minConfidence float64) (string, error) {
+	if minConfidence < 0 {
+		minConfidence = Load().MinConfidence
+	}
 	p, err := path()
 	if err != nil {
 		return "", err
@@ -146,6 +166,9 @@ func Save(model, apiKey, baseURL string) (string, error) {
 	}
 	if baseURL != "" {
 		fmt.Fprintf(&b, "base_url = %s\n", baseURL)
+	}
+	if minConfidence > 0 {
+		fmt.Fprintf(&b, "min_confidence = %g\n", minConfidence)
 	}
 
 	// Write-then-rename so an interrupted save cannot leave a half-written

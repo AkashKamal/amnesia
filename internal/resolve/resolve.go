@@ -95,11 +95,23 @@ type Resolver struct {
 	Cache Cache // nil disables the learned stage
 	Model Model // nil means offline
 
-	// FuzzyFloor is the minimum score a fuzzy candidate needs before we return
-	// it instead of escalating to the model. Too low and users get confidently
-	// wrong commands; too high and we spend money on questions the corpus
-	// already answers. Tuned against testdata/queries.txt.
+	// FuzzyFloor is the minimum score a fuzzy candidate needs when there is no
+	// model to escalate to. Offline, a labelled 60%-confidence answer beats no
+	// answer at all, so this stays permissive.
 	FuzzyFloor float64
+
+	// EscalateBelow is the floor used when a model IS configured. It is much
+	// higher, because an escalated query is not lost - it goes to an API that is
+	// likely to be right precisely where the corpus scored badly.
+	//
+	// Measured over stress/queries.txt: at 0.55 the corpus keeps 40 right and 23
+	// wrong; at 0.80 it keeps 28 right and 9 wrong, escalating 26. That trades
+	// instant-and-free answers for roughly a third fewer wrong commands. Going
+	// to 0.90 halves the wrong answers again but escalates 59% of the miss path,
+	// which costs money and defeats "offline first".
+	//
+	// Set it to 1.0 to only ever answer locally from an exact corpus hit.
+	EscalateBelow float64
 	// MaxResults caps what we show. Past a handful the user is reading a menu
 	// instead of confirming a command.
 	MaxResults int
@@ -123,11 +135,12 @@ type Resolver struct {
 
 func New(env Env) *Resolver {
 	return &Resolver{
-		Env:        env,
-		Cache:      NopCache{},
-		FuzzyFloor: 0.55,
-		MaxResults: 3,
-		HasTool:    lookPath(),
+		Env:           env,
+		Cache:         NopCache{},
+		FuzzyFloor:    0.55,
+		EscalateBelow: 0.80,
+		MaxResults:    3,
+		HasTool:       lookPath(),
 	}
 }
 
@@ -146,6 +159,18 @@ func lookPath() func(string) bool {
 		seen[tool] = err == nil
 		return err == nil
 	}
+}
+
+// floor is how sure the corpus must be before answering instead of escalating.
+// With no model there is nothing to escalate to, so the bar drops.
+func (r *Resolver) floor() float64 {
+	if r.Model == nil {
+		return r.FuzzyFloor
+	}
+	if r.EscalateBelow > 0 {
+		return r.EscalateBelow
+	}
+	return r.FuzzyFloor
 }
 
 func (r *Resolver) installed(tool string) bool {
@@ -230,12 +255,16 @@ func (r *Resolver) Resolve(ctx context.Context, query string) ([]Result, error) 
 	// they learn nothing. Only the model, which can answer for this specific
 	// machine, gets to displace it.
 	if best == nil {
-		if out := r.fuzzy(key); len(out) > 0 && out[0].Confidence >= r.FuzzyFloor {
+		if out := r.fuzzy(key); len(out) > 0 && out[0].Confidence >= r.floor() {
 			return r.finish(out, start), nil
 		}
 	}
 
 	if r.Model == nil {
+		// Offline: a low-confidence answer, clearly labelled, beats nothing.
+		if out := r.fuzzy(key); len(out) > 0 && out[0].Confidence >= r.FuzzyFloor && best == nil {
+			return r.finish(out, start), nil
+		}
 		if best != nil {
 			return r.finish(best, start), nil
 		}

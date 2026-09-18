@@ -63,7 +63,7 @@ packaging.</sub>
 
 ```sh
 amnesia <what you want to do>     # resolve, show, confirm, run
-amnesia model [spec] [api-key]    # show or set the model used when the corpus misses
+amnesia setup                     # pick a provider, paste a key
 amnesia doctor                    # what amnesia detected, and what to fix
 amnesia forget                    # delete everything amnesia has cached
 ```
@@ -99,52 +99,96 @@ Three rules, no exceptions:
   and ranks what you can actually run first, then tells you plainly when the
   best answer needs something you haven't installed.
 
-## Optional: a model for the questions the corpus can't answer
-
-Amnesia is useful with no model at all — the corpus is offline and answers most
-things. For the rest, point it at a model **once**:
+## Setup: a model for what the corpus can't answer confidently
 
 ```sh
-amnesia model                 # shows what you have, and every way to set it up
+amnesia setup
 ```
 
-**Free and private, on your own machine.** Install
-[Ollama](https://ollama.com/download), pull any chat model, and amnesia finds it
-by itself — no configuration:
+Pick a provider, paste a key, done. The key is checked immediately, and amnesia
+asks the provider which models it can actually use rather than guessing an id
+that will be stale in a year.
 
-```sh
-ollama pull llama3.2:1b       # ~1.3 GB. Small is good here: this task is easy,
-                              # and a 1B model answers in a second.
+```
+   1. Ollama                 free, runs on your machine, nothing leaves it
+   2. Claude (Anthropic)     strong on shell and code
+   3. Gemini (Google)        generous free tier
+   4. ChatGPT (OpenAI)
+   5. Groq                   fastest hosted, free tier
+   6. DeepSeek               cheapest hosted
+   7. OpenRouter             one key, many models
+   8. Together
+   9. Other (OpenAI-compatible)   LM Studio, llama.cpp, vLLM, LiteLLM
+  10. None                   corpus only, fully offline
+
+  Choose [1-10]: 2
+  Paste your API key: ****
+  Checking the key... works
+  Picking a model...  claude-haiku-4-5
 ```
 
-> Amnesia asks Ollama what you have installed and uses the smallest one. It never
-> assumes a model name, so it works whatever you happen to have pulled.
+Claude and Gemini are spoken **natively** — the Messages API and
+`generateContent`, not an OpenAI-compatibility shim — because a shim works right
+up until it quietly doesn't, and a wrong shell command is the one thing this
+tool must not produce.
 
-**Or a hosted provider**, nothing to download:
+Saved to a `0600` config file, so you set it once instead of exporting
+environment variables into every shell. `amnesia model none` turns it off.
 
-```sh
-amnesia model groq/llama-3.3-70b-versatile gsk_your_key_here
-```
+### When does it call the API?
 
-Saved to a config file, so you set it once instead of exporting environment
-variables into every shell. `amnesia model none` turns it back off.
-
-Works with **ollama, groq, deepseek, openai, openrouter, together**, and
-`custom` + `AMNESIA_BASE_URL` for anything else that speaks the OpenAI API —
-LM Studio, llama.cpp, vLLM, LiteLLM. Anything on `localhost` automatically gets
-a long timeout, because a cold local model can take a minute to load.
-
-<details>
-<summary>Environment variables (all optional, and they override the config file)</summary>
+Only when the corpus isn't confident enough. Every answer carries a match score:
 
 | | |
 |---|---|
-| `AMNESIA_MODEL` | `provider[/model]`, e.g. `ollama`, `groq/llama-3.3-70b-versatile` |
-| `AMNESIA_API_KEY` | key for the chosen provider (or `GROQ_API_KEY`, …) |
+| Exact corpus hit (100%) | answered locally, **never** costs an API call |
+| Confident fuzzy match | answered locally |
+| Below the threshold | **automatically escalated to your provider**, then cached |
+
+The default threshold is **0.80 when a provider is configured** and 0.55 when
+one isn't — there's no point holding out for certainty when there's nothing to
+escalate to. Measured over the 68-query golden set in `stress/`:
+
+| threshold | kept right | kept **wrong** | escalated |
+|---|---|---|---|
+| 0.55 | 40 | **23** | 0 |
+| 0.70 | 34 | 14 | 15 |
+| **0.80** (default) | 28 | **9** | 26 |
+| 0.90 | 22 | 4 | 37 |
+
+Escalated queries aren't lost — they go to a model that is likely right exactly
+where the corpus scored badly. Tune it:
+
+```sh
+amnesia --min-confidence 0.95 <query>   # one-off
+AMNESIA_MIN_CONFIDENCE=0.95             # this shell
+# or min_confidence = 0.95 in the config file
+```
+
+**Set it to `1.0` for maximum accuracy:** only exact corpus hits are answered
+locally, everything else goes to the API.
+
+<details>
+<summary>Non-interactive setup, and environment variables</summary>
+
+```sh
+amnesia model claude/claude-haiku-4-5 sk-ant-...
+amnesia model gemini <api-key>
+amnesia model ollama                      # auto-detects your installed models
+```
+
+| | |
+|---|---|
+| `AMNESIA_MODEL` | `provider[/model]` |
+| `AMNESIA_API_KEY` | key for the chosen provider (or `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, …) |
 | `AMNESIA_BASE_URL` | any OpenAI-compatible endpoint |
+| `AMNESIA_MIN_CONFIDENCE` | `0`–`1`, the escalation threshold |
 | `AMNESIA_TIMEOUT` | e.g. `5m`, for a slow local model |
 | `AMNESIA_OFFLINE` | set to anything to force offline |
 | `AMNESIA_HOME` | where the config and cache live |
+
+Anything on `localhost` automatically gets a long timeout, because a cold local
+model can take a minute to load.
 
 </details>
 

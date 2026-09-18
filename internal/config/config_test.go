@@ -24,7 +24,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("AMNESIA_HOME", dir)
 
-	if _, err := Save("groq/llama-3.3-70b-versatile", "gsk_secret_value", ""); err != nil {
+	if _, err := Save("groq/llama-3.3-70b-versatile", "gsk_secret_value", "", -1); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 	c := Load()
@@ -38,7 +38,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 
 func TestEnvironmentOverridesFile(t *testing.T) {
 	t.Setenv("AMNESIA_HOME", t.TempDir())
-	if _, err := Save("groq/from-file", "key-from-file", ""); err != nil {
+	if _, err := Save("groq/from-file", "key-from-file", "", -1); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("AMNESIA_MODEL", "ollama/from-env")
@@ -58,11 +58,11 @@ func TestEnvironmentOverridesFile(t *testing.T) {
 
 func TestChangingModelKeepsTheSavedKey(t *testing.T) {
 	t.Setenv("AMNESIA_HOME", t.TempDir())
-	if _, err := Save("groq/one", "gsk_keep_me", ""); err != nil {
+	if _, err := Save("groq/one", "gsk_keep_me", "", -1); err != nil {
 		t.Fatal(err)
 	}
 	c := Load()
-	if _, err := Save("groq/two", c.APIKey, c.BaseURL); err != nil {
+	if _, err := Save("groq/two", c.APIKey, c.BaseURL, -1); err != nil {
 		t.Fatal(err)
 	}
 	if got := Load(); got.APIKey != "gsk_keep_me" {
@@ -80,7 +80,7 @@ func TestConfigFileIsNotWorldReadable(t *testing.T) {
 	}
 	dir := t.TempDir()
 	t.Setenv("AMNESIA_HOME", dir)
-	p, err := Save("groq/x", "gsk_secret", "")
+	p, err := Save("groq/x", "gsk_secret", "", -1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestMalformedLinesAreSkippedNotFatal(t *testing.T) {
 
 func TestClearIsIdempotent(t *testing.T) {
 	t.Setenv("AMNESIA_HOME", t.TempDir())
-	if _, err := Save("ollama", "", ""); err != nil {
+	if _, err := Save("ollama", "", "", -1); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {

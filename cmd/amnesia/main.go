@@ -43,24 +43,25 @@ const usage = `amnesia - natural language to shell commands, offline first
 
 usage:
   amnesia <what you want to do>     resolve a command and confirm before running
-  amnesia model [spec] [api-key]    show or set the model used when the corpus misses
+  amnesia setup                     pick a provider and paste an API key
+  amnesia model [spec] [api-key]    show or set the model non-interactively
   amnesia doctor                    show what amnesia detected, and what to fix
   amnesia forget                    delete everything amnesia has cached
   amnesia version                   print the version
 
 setup:
   amnesia works with no setup at all; the built-in corpus is offline.
-  For the questions it cannot answer, point it at a model:
-
-  amnesia model ollama                                  free, local, auto-detected
-  amnesia model groq/llama-3.3-70b-versatile <api-key>  hosted
-  amnesia model none                                    corpus only
+  For the questions it cannot answer confidently, run "amnesia setup" and
+  pick a provider - Ollama, Claude, Gemini, ChatGPT, Groq, DeepSeek and more.
 
 flags:
   --offline     never call a model; corpus and cache only
   --yes         skip the prompt for commands classified safe
   --json        print candidates as JSON and exit without running anything
   --no-cache    do not read or write the learned cache
+  --min-confidence <0..1>
+                how sure the corpus must be before answering instead of
+                asking the model. Higher is more accurate and slower.
 
 environment:
   all optional, and they override the config file
@@ -68,6 +69,7 @@ environment:
   AMNESIA_API_KEY    key for the chosen provider (or GROQ_API_KEY, OPENAI_API_KEY, ...)
   AMNESIA_BASE_URL   any OpenAI-compatible endpoint (LM Studio, llama.cpp, vLLM)
   AMNESIA_TIMEOUT    e.g. 5m, for a slow local model
+  AMNESIA_MIN_CONFIDENCE  0..1, the corpus confidence floor
   AMNESIA_OFFLINE    set to anything to force offline
   AMNESIA_HOME       where to keep the config and cache
 `
@@ -77,6 +79,7 @@ type options struct {
 	yes     bool
 	asJSON  bool
 	noCache bool
+	minConf float64
 }
 
 func main() {
@@ -105,6 +108,7 @@ func run() int {
 	fs.BoolVar(&opt.yes, "yes", false, "")
 	fs.BoolVar(&opt.asJSON, "json", false, "")
 	fs.BoolVar(&opt.noCache, "no-cache", false, "")
+	fs.Float64Var(&opt.minConf, "min-confidence", 0, "")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return 2
 	}
@@ -118,7 +122,9 @@ func run() int {
 	switch args[0] {
 	case "doctor":
 		return doctor(opt)
-	case "model", "setup":
+	case "setup":
+		return setupCmd(args[1:])
+	case "model":
 		return modelCmd(args[1:])
 	case "forget":
 		return forget()
@@ -140,6 +146,16 @@ func resolveAndRun(query string, opt options) int {
 		r.HasTool = toolpath.Has(dir)
 	}
 
+	// How sure the corpus must be before answering instead of asking the model.
+	// Flag beats config beats the measured default.
+	cfg := config.Load()
+	if cfg.MinConfidence > 0 {
+		r.EscalateBelow = cfg.MinConfidence
+	}
+	if opt.minConf > 0 {
+		r.EscalateBelow = opt.minConf
+	}
+
 	var cache *store.Cache
 	if !opt.noCache {
 		c, err := store.Open()
@@ -150,7 +166,7 @@ func resolveAndRun(query string, opt options) int {
 		}
 	}
 	if !opt.offline {
-		if m := model.New(config.Load()); m != nil {
+		if m := model.New(cfg); m != nil {
 			r.Model = m
 			r.OnModelCall = func(name string) {
 				if opt.asJSON {
@@ -368,6 +384,8 @@ func doctor(opt options) int {
 	return 0
 }
 
+func corpusSize() int { return corpus.Len() }
+
 func origin(o config.Origin) string {
 	if o == "" {
 		return "detected"
@@ -436,7 +454,7 @@ func modelCmd(args []string) int {
 		apiKey = args[1]
 	}
 
-	path, err := config.Save(spec, apiKey, cfg.BaseURL)
+	path, err := config.Save(spec, apiKey, cfg.BaseURL, -1)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "amnesia:", err)
 		return 1

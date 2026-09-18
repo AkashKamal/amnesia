@@ -228,6 +228,12 @@ func accuracy() bool {
 		fatal(err)
 	}
 
+	type sample struct {
+		conf    float64
+		correct bool
+	}
+	var samples []sample
+
 	var (
 		hit1, hit3, scored, noAnswer int
 		uninstalledTop               int
@@ -273,6 +279,7 @@ func accuracy() bool {
 
 		scored++
 		rank := rankOfMatch(r.results, q.expect)
+		samples = append(samples, sample{top.Confidence, rank == 1})
 		t := byTag[q.tag]
 		t[1]++
 		switch {
@@ -334,6 +341,31 @@ func accuracy() bool {
 	for _, t := range tags {
 		v := byTag[t]
 		fmt.Printf("    %-10s %s\n", t, pct(v[0], v[1]))
+	}
+
+	// Threshold sweep. The floor decides when amnesia answers from the corpus
+	// and when it escalates to the model, and picking it by intuition is how a
+	// tool ends up confidently wrong. Each row is what WOULD happen at that
+	// floor, computed from this one run.
+	fmt.Printf("\n  confidence floor sweep (what escalates to the model):\n")
+	fmt.Printf("    floor   kept-right  kept-WRONG  escalated\n")
+	for _, f := range []float64{0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.90} {
+		keptRight, keptWrong, escalated := 0, 0, 0
+		for _, s := range samples {
+			switch {
+			case s.conf < f:
+				escalated++
+			case s.correct:
+				keptRight++
+			default:
+				keptWrong++
+			}
+		}
+		mark := ""
+		if f == 0.55 {
+			mark = "  <- previous default"
+		}
+		fmt.Printf("    %.2f    %-11d %-11d %d%s\n", f, keptRight, keptWrong, escalated, mark)
 	}
 
 	sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })

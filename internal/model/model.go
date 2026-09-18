@@ -1,21 +1,18 @@
 // Package model is the last stage of the resolution cascade: an LLM that turns
 // a query the corpus could not answer into a command.
 //
-// Every provider worth supporting - Ollama, Groq, DeepSeek, OpenRouter,
-// Together, OpenAI - speaks the same /v1/chat/completions shape. So there is
-// one client and providers are just a (base URL, key, model) triple. Vendoring
-// four SDKs to send the same JSON would be four dependencies and four
-// breakages.
+// The guiding rule is: never assume anything about the user's setup that can be
+// asked instead. A hardcoded model id is wrong for many people on the day it
+// ships and wrong for everyone a year later, so amnesia asks each provider what
+// it actually has and pins the answer at setup time.
 //
-// The guiding rule here is: never assume anything about the user's machine that
-// can be asked instead. A hardcoded default model id is wrong for most people
-// on the day it ships and wrong for everyone a year later.
+// Wire formats live in transport.go. There are three, because Anthropic and
+// Google do not speak OpenAI's shape and pretending otherwise would eventually
+// produce a wrong command.
 package model
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -27,32 +24,93 @@ import (
 	"github.com/AkashKamal/amnesia/internal/resolve"
 )
 
-// Provider is a known endpoint. Anything not listed still works by setting a
-// base URL: the point is zero-config for the common cases, not a registry that
-// has to be complete.
+// Provider is one endpoint amnesia knows how to talk to.
 type Provider struct {
 	Name    string
+	Label   string // what a human calls it
 	BaseURL string
-	EnvKey  string
+	EnvKey  string // conventional environment variable for its key
+	KeyURL  string // where to get a key, printed during setup
+	Note    string // one line shown in the setup list
+	Kind    string // which transport: openai | anthropic | gemini
+	Local   bool
 	// Fallback is used only when the provider cannot be asked what it has.
-	// For Ollama it is a suggestion to print, never a model we assume exists.
 	Fallback string
-	Local    bool
 }
 
 var providers = map[string]Provider{
-	"ollama":     {Name: "ollama", BaseURL: "http://localhost:11434/v1", Fallback: "llama3.2", Local: true},
-	"groq":       {Name: "groq", BaseURL: "https://api.groq.com/openai/v1", EnvKey: "GROQ_API_KEY", Fallback: "llama-3.3-70b-versatile"},
-	"deepseek":   {Name: "deepseek", BaseURL: "https://api.deepseek.com/v1", EnvKey: "DEEPSEEK_API_KEY", Fallback: "deepseek-chat"},
-	"openai":     {Name: "openai", BaseURL: "https://api.openai.com/v1", EnvKey: "OPENAI_API_KEY", Fallback: "gpt-4o-mini"},
-	"openrouter": {Name: "openrouter", BaseURL: "https://openrouter.ai/api/v1", EnvKey: "OPENROUTER_API_KEY", Fallback: "meta-llama/llama-3.3-70b-instruct"},
-	"together":   {Name: "together", BaseURL: "https://api.together.xyz/v1", EnvKey: "TOGETHER_API_KEY", Fallback: "meta-llama/Llama-3.3-70B-Instruct-Turbo"},
-	// A catch-all for LM Studio, llama.cpp, vLLM, LiteLLM and anything else
-	// that speaks the OpenAI shape. The user supplies the base URL.
-	"custom": {Name: "custom", Local: false},
+	"ollama": {
+		Name: "ollama", Label: "Ollama", Kind: "openai", Local: true,
+		BaseURL: "http://localhost:11434/v1", Fallback: "llama3.2",
+		Note: "free, runs on your machine, nothing leaves it",
+	},
+	"claude": {
+		Name: "claude", Label: "Claude (Anthropic)", Kind: "anthropic",
+		BaseURL: "https://api.anthropic.com/v1", EnvKey: "ANTHROPIC_API_KEY",
+		KeyURL:   "https://console.anthropic.com/settings/keys",
+		Fallback: "claude-haiku-4-5", Note: "strong on shell and code",
+	},
+	"gemini": {
+		Name: "gemini", Label: "Gemini (Google)", Kind: "gemini",
+		BaseURL: "https://generativelanguage.googleapis.com/v1beta", EnvKey: "GEMINI_API_KEY",
+		KeyURL:   "https://aistudio.google.com/apikey",
+		Fallback: "gemini-2.5-flash", Note: "generous free tier",
+	},
+	"openai": {
+		Name: "openai", Label: "ChatGPT (OpenAI)", Kind: "openai",
+		BaseURL: "https://api.openai.com/v1", EnvKey: "OPENAI_API_KEY",
+		KeyURL:   "https://platform.openai.com/api-keys",
+		Fallback: "gpt-4o-mini", Note: "",
+	},
+	"groq": {
+		Name: "groq", Label: "Groq", Kind: "openai",
+		BaseURL: "https://api.groq.com/openai/v1", EnvKey: "GROQ_API_KEY",
+		KeyURL:   "https://console.groq.com/keys",
+		Fallback: "llama-3.3-70b-versatile", Note: "fastest hosted, free tier",
+	},
+	"deepseek": {
+		Name: "deepseek", Label: "DeepSeek", Kind: "openai",
+		BaseURL: "https://api.deepseek.com/v1", EnvKey: "DEEPSEEK_API_KEY",
+		KeyURL:   "https://platform.deepseek.com/api_keys",
+		Fallback: "deepseek-chat", Note: "cheapest hosted",
+	},
+	"openrouter": {
+		Name: "openrouter", Label: "OpenRouter", Kind: "openai",
+		BaseURL: "https://openrouter.ai/api/v1", EnvKey: "OPENROUTER_API_KEY",
+		KeyURL:   "https://openrouter.ai/keys",
+		Fallback: "meta-llama/llama-3.3-70b-instruct", Note: "one key, many models",
+	},
+	"together": {
+		Name: "together", Label: "Together", Kind: "openai",
+		BaseURL: "https://api.together.xyz/v1", EnvKey: "TOGETHER_API_KEY",
+		KeyURL:   "https://api.together.xyz/settings/api-keys",
+		Fallback: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+	},
+	"custom": {
+		Name: "custom", Label: "Other (OpenAI-compatible)", Kind: "openai",
+		Note: "LM Studio, llama.cpp, vLLM, LiteLLM - set AMNESIA_BASE_URL",
+	},
 }
 
-// Names lists configurable providers, for help text and error messages.
+// setupOrder is the order `amnesia setup` lists providers: free and local
+// first, then the ones most people have heard of.
+var setupOrder = []string{"ollama", "claude", "gemini", "openai", "groq", "deepseek", "openrouter", "together", "custom"}
+
+// Catalog returns providers in the order setup presents them.
+func Catalog() []Provider {
+	out := make([]Provider, 0, len(setupOrder))
+	for _, n := range setupOrder {
+		out = append(out, providers[n])
+	}
+	return out
+}
+
+func Lookup(name string) (Provider, bool) {
+	p, ok := providers[name]
+	return p, ok
+}
+
+// Names lists provider ids, for help text and error messages.
 func Names() []string {
 	out := make([]string, 0, len(providers))
 	for n := range providers {
@@ -62,17 +120,31 @@ func Names() []string {
 	return out
 }
 
+func transportFor(kind string) transport {
+	switch kind {
+	case "anthropic":
+		return anthropicTransport{}
+	case "gemini":
+		return geminiTransport{}
+	default:
+		return openAITransport{}
+	}
+}
+
 type Client struct {
 	provider string
 	baseURL  string
 	apiKey   string
 	model    string
+	tr       transport
 	http     *http.Client
 }
 
-// Status explains what amnesia found, so `amnesia doctor` can give an
-// instruction rather than a shrug. Ready is false when there is nothing usable;
-// Hint is then the single next command the user should run.
+func (c *Client) Name() string { return c.provider + "/" + c.model }
+
+// Status explains what amnesia found, so the CLI can give an instruction rather
+// than a shrug. Ready is false when there is nothing usable; Hint is then the
+// single next thing the user should do.
 type Status struct {
 	Ready    bool
 	Provider string
@@ -84,33 +156,35 @@ type Status struct {
 // New returns a model client, or nil for offline. Offline is a supported mode,
 // not a failure: the corpus answers most queries without any of this.
 func New(cfg config.Config) resolve.Model {
-	c, _ := resolve2(cfg)
+	c, _ := resolveClient(cfg)
+	if c == nil {
+		return nil // typed nil would satisfy the interface and break `!= nil`
+	}
 	return c
 }
 
-// Describe reports what New would do and why, without performing a resolution.
+// Describe reports what New would do and why, without sending a request.
 func Describe(cfg config.Config) Status {
-	_, st := resolve2(cfg)
+	_, st := resolveClient(cfg)
 	return st
 }
 
-func resolve2(cfg config.Config) (resolve.Model, Status) {
+func resolveClient(cfg config.Config) (*Client, Status) {
 	if os.Getenv("AMNESIA_OFFLINE") != "" {
 		return nil, Status{Hint: "AMNESIA_OFFLINE is set; unset it to use a model"}
 	}
 
-	// 1. An explicit choice always wins, from config file or environment.
+	// 1. An explicit choice wins, from config file or environment.
 	if cfg.Model != "" && cfg.Model != "none" {
 		name, id, _ := strings.Cut(cfg.Model, "/")
 		p, ok := providers[name]
 		if !ok {
-			return nil, Status{Hint: fmt.Sprintf("unknown provider %q; try one of: %s",
+			return nil, Status{Hint: fmt.Sprintf("unknown provider %q. Run `amnesia setup`, or pick one of: %s",
 				name, strings.Join(Names(), ", "))}
 		}
 		p = applyOverrides(p, cfg)
 
 		if id == "" {
-			// Ask the provider what it has rather than guessing an id.
 			if p.Local {
 				installed := ollamaModels(p.BaseURL)
 				if len(installed) == 0 {
@@ -122,17 +196,17 @@ func resolve2(cfg config.Config) (resolve.Model, Status) {
 			}
 		}
 		if p.BaseURL == "" {
-			return nil, Status{Hint: "provider \"custom\" needs a base URL: set AMNESIA_BASE_URL"}
+			return nil, Status{Hint: "provider \"custom\" needs an endpoint: set AMNESIA_BASE_URL"}
 		}
 		if !p.Local && p.EnvKey != "" && key(p, cfg) == "" {
-			return nil, Status{Hint: fmt.Sprintf("%s needs an API key: amnesia model %s <api-key>", p.Name, cfg.Model)}
+			return nil, Status{Hint: fmt.Sprintf("%s needs an API key. Run `amnesia setup`.", p.Label)}
 		}
 		return build(p, id, cfg), Status{Ready: true, Provider: p.Name, Model: id, Origin: cfg.ModelFrom}
 	}
 
-	// 2. Nothing chosen. A key sitting in the environment is an unambiguous
-	//    signal, and it beats a local Ollama the user may run for other things.
-	for _, name := range []string{"groq", "deepseek", "openai", "openrouter", "together"} {
+	// 2. Nothing chosen. A key already in the environment is unambiguous
+	//    intent, and beats a local Ollama the user may run for other things.
+	for _, name := range []string{"claude", "gemini", "openai", "groq", "deepseek", "openrouter", "together"} {
 		p := providers[name]
 		if os.Getenv(p.EnvKey) != "" {
 			return build(p, p.Fallback, cfg), Status{
@@ -143,32 +217,30 @@ func resolve2(cfg config.Config) (resolve.Model, Status) {
 
 	// 3. A running Ollama, using a model it actually has. This is the whole
 	//    zero-configuration path, and it must never name a model on faith.
-	p := providers["ollama"]
-	p = applyOverrides(p, cfg)
+	p := applyOverrides(providers["ollama"], cfg)
 	if installed := ollamaModels(p.BaseURL); len(installed) > 0 {
 		return build(p, installed[0], cfg), Status{
 			Ready: true, Provider: p.Name, Model: installed[0], Origin: config.FromDetected,
 		}
 	}
 
-	return nil, Status{} // nothing configured and nothing detected; the caller prints the setup guide
+	return nil, Status{} // nothing set up; the caller prints the setup guide
 }
 
 func hintNoModels(p Provider) string {
 	if reachable(p.BaseURL) {
-		return fmt.Sprintf("%s is running but has no chat models. Pull one, smallest first:\n"+
-			"    ollama pull %s", p.Name, p.Fallback)
+		return fmt.Sprintf("Ollama is running but has no chat models. Pull a small one:\n" +
+			"    ollama pull llama3.2:1b")
 	}
-	return fmt.Sprintf("%s is not reachable at %s. Start it, or pick a hosted provider with `amnesia model`.",
-		p.Name, p.BaseURL)
+	return fmt.Sprintf("Ollama is not reachable at %s. Start it, or run `amnesia setup` to use a hosted provider.", p.BaseURL)
 }
 
 func applyOverrides(p Provider, cfg config.Config) Provider {
 	if cfg.BaseURL != "" {
 		p.BaseURL = strings.TrimSuffix(cfg.BaseURL, "/")
-		// A user-supplied endpoint on loopback is still a local model, and gets
-		// the long cold-start timeout. This is what makes LM Studio, llama.cpp
-		// and vLLM behave sensibly without amnesia knowing they exist.
+		// A user-supplied endpoint on loopback is a local model and gets the
+		// long cold-start timeout. This is what makes LM Studio, llama.cpp and
+		// vLLM behave sensibly without amnesia knowing they exist.
 		p.Local = isLoopback(p.BaseURL)
 	}
 	return p
@@ -194,14 +266,43 @@ func build(p Provider, id string, cfg config.Config) *Client {
 		baseURL:  strings.TrimSuffix(p.BaseURL, "/"),
 		apiKey:   key(p, cfg),
 		model:    id,
+		tr:       transportFor(p.Kind),
 		http:     &http.Client{Timeout: timeout(p)},
 	}
 }
 
-// timeout is generous for anything on loopback and tight for anything remote.
-// A local model may have to be read off disk into VRAM before it answers a
-// single token, which takes tens of seconds for a large one; a hosted API that
-// has not replied in 20s is not going to. One number cannot serve both.
+// NewFor builds a client for setup: an explicit provider, key and model, with
+// no config lookup. Used to validate a key the moment it is pasted.
+func NewFor(p Provider, apiKey, id string) *Client {
+	base := p.BaseURL
+	if v := os.Getenv("AMNESIA_BASE_URL"); v != "" {
+		base = v
+	}
+	if id == "" {
+		id = p.Fallback
+	}
+	return &Client{
+		provider: p.Name,
+		baseURL:  strings.TrimSuffix(base, "/"),
+		apiKey:   apiKey,
+		model:    id,
+		tr:       transportFor(p.Kind),
+		http:     &http.Client{Timeout: 20 * time.Second},
+	}
+}
+
+// Validate checks a key without spending tokens.
+func (c *Client) Validate(ctx context.Context) error { return c.tr.validate(ctx, c) }
+
+// Discover asks the provider which model to use, so nothing is hardcoded.
+func (c *Client) Discover(ctx context.Context) (string, error) { return c.tr.discover(ctx, c) }
+
+// Model reports the id this client will send.
+func (c *Client) Model() string { return c.model }
+
+// timeout is generous on loopback and tight for anything remote. A local model
+// may be read off disk into VRAM before it emits a token, which takes tens of
+// seconds; a hosted API that has not replied in 20s is not going to.
 func timeout(p Provider) time.Duration {
 	d := 20 * time.Second
 	if p.Local {
@@ -214,8 +315,6 @@ func timeout(p Provider) time.Duration {
 	}
 	return d
 }
-
-func (c *Client) Name() string { return c.provider + "/" + c.model }
 
 func reachable(baseURL string) bool {
 	client := &http.Client{Timeout: 400 * time.Millisecond}
@@ -233,76 +332,6 @@ func root(baseURL string) string {
 	return strings.TrimSuffix(strings.TrimSuffix(baseURL, "/"), "/v1")
 }
 
-// ollamaModels returns installed chat models, smallest first.
-//
-// Smallest first because turning one English sentence into one shell command is
-// an easy task, and on the miss path of a CLI that promises to feel instant, a
-// 1B model answering in 300ms beats a 70B model answering in 20s. Anyone who
-// disagrees names a model explicitly and is never second-guessed.
-func ollamaModels(baseURL string) []string {
-	client := &http.Client{Timeout: 800 * time.Millisecond}
-	resp, err := client.Get(root(baseURL) + "/api/tags")
-	if err != nil {
-		return nil
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil
-	}
-
-	var payload struct {
-		Models []struct {
-			Name    string `json:"name"`
-			Size    int64  `json:"size"`
-			Details struct {
-				Family string `json:"family"`
-			} `json:"details"`
-		} `json:"models"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return nil
-	}
-
-	type m struct {
-		name string
-		size int64
-	}
-	var usable []m
-	for _, x := range payload.Models {
-		if isEmbedding(x.Name, x.Details.Family) {
-			continue
-		}
-		usable = append(usable, m{x.Name, x.Size})
-	}
-	sort.Slice(usable, func(i, j int) bool {
-		if usable[i].size != usable[j].size {
-			return usable[i].size < usable[j].size
-		}
-		return usable[i].name < usable[j].name // deterministic across runs
-	})
-
-	out := make([]string, 0, len(usable))
-	for _, x := range usable {
-		out = append(out, x.name)
-	}
-	return out
-}
-
-// isEmbedding filters models that cannot hold a conversation. Ollama does not
-// flag them directly, so this matches the naming conventions every embedding
-// model on the registry actually follows, plus the BERT families they are built
-// on. A false negative costs one clear error; a false positive costs nothing,
-// because nobody picks an embedding model to write shell commands.
-func isEmbedding(name, family string) bool {
-	n := strings.ToLower(name)
-	for _, s := range []string{"embed", "bge-", "bge:", "gte-", "gte:", "e5-", "minilm"} {
-		if strings.Contains(n, s) {
-			return true
-		}
-	}
-	return strings.Contains(strings.ToLower(family), "bert")
-}
-
 const systemPrompt = `You translate a developer's request into a single shell command.
 
 Rules:
@@ -314,86 +343,17 @@ Rules:
   container name, pod name, path or host.
 - If the request is not a shell task, reply {"suggestions":[]}.`
 
-type chatReq struct {
-	Model          string    `json:"model"`
-	Messages       []message `json:"messages"`
-	Temperature    float64   `json:"temperature"`
-	ResponseFormat *rformat  `json:"response_format,omitempty"`
-}
-
-type rformat struct {
-	Type string `json:"type"`
-}
-
-type message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-type chatResp struct {
-	Choices []struct {
-		Message message `json:"message"`
-	} `json:"choices"`
-	Error *struct {
-		Message string `json:"message"`
-	} `json:"error"`
-}
-
-type suggestion struct {
-	Command     string `json:"command"`
-	Description string `json:"description"`
-	Tool        string `json:"tool"`
-}
-
 func (c *Client) Suggest(ctx context.Context, query string, env resolve.Env) ([]resolve.Result, error) {
-	body, err := json.Marshal(chatReq{
-		Model:       c.model,
-		Temperature: 0,
-		// Not every gateway honours this, which is why parseSuggestions also
-		// copes with a JSON object wrapped in prose.
-		ResponseFormat: &rformat{Type: "json_object"},
-		Messages: []message{
-			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: fmt.Sprintf("OS: %s\nShell: %s\n\nRequest: %s", env.Platform, env.Shell, query)},
-		},
-	})
+	user := fmt.Sprintf("OS: %s\nShell: %s\n\nRequest: %s", env.Platform, env.Shell, query)
+	raw, err := c.tr.complete(ctx, c, systemPrompt, user)
 	if err != nil {
 		return nil, err
 	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if c.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	}
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, c.explain(err)
-	}
-	defer resp.Body.Close()
-
-	var out chatResp
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, fmt.Errorf("%s: unreadable response: %w", c.Name(), err)
-	}
-	if out.Error != nil {
-		return nil, c.explainAPI(resp.StatusCode, out.Error.Message)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, c.explainAPI(resp.StatusCode, "")
-	}
-	if len(out.Choices) == 0 {
-		return nil, fmt.Errorf("%s: empty response", c.Name())
-	}
-	return parseSuggestions(out.Choices[0].Message.Content)
+	return parseSuggestions(raw)
 }
 
-// explain turns a transport failure into something the user can act on. "context
-// deadline exceeded" tells a reader nothing about what to do next.
+// explain turns a transport failure into something the user can act on.
+// "context deadline exceeded" tells a reader nothing about what to do next.
 func (c *Client) explain(err error) error {
 	msg := err.Error()
 	switch {
@@ -405,8 +365,8 @@ func (c *Client) explain(err error) error {
 		return fmt.Errorf("%s timed out. Check your connection, or raise AMNESIA_TIMEOUT", c.Name())
 	case strings.Contains(msg, "connection refused") || strings.Contains(msg, "no such host"):
 		if isLoopback(c.baseURL) {
-			return fmt.Errorf("nothing is listening at %s. Start it (`ollama serve`) or run `amnesia model` "+
-				"to pick a hosted provider", c.baseURL)
+			return fmt.Errorf("nothing is listening at %s. Start it (`ollama serve`), or run "+
+				"`amnesia setup` to use a hosted provider", c.baseURL)
 		}
 		return fmt.Errorf("%s is unreachable at %s", c.Name(), c.baseURL)
 	}
@@ -416,15 +376,17 @@ func (c *Client) explain(err error) error {
 func (c *Client) explainAPI(status int, msg string) error {
 	switch status {
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return fmt.Errorf("%s rejected the API key. Set a working one: amnesia model %s <api-key>", c.Name(), c.Name())
+		return fmt.Errorf("%s rejected the API key. Run `amnesia setup` to replace it", c.provider)
 	case http.StatusNotFound:
 		if isLoopback(c.baseURL) {
 			return fmt.Errorf("%s does not have model %q. Pull it (`ollama pull %s`), or run "+
-				"`amnesia model ollama` to use whichever model you already have", c.provider, c.model, c.model)
+				"`amnesia setup`", c.provider, c.model, c.model)
 		}
-		return fmt.Errorf("%s does not have model %q", c.provider, c.model)
+		return fmt.Errorf("%s does not have model %q. Run `amnesia setup` to pick one it does", c.provider, c.model)
 	case http.StatusTooManyRequests:
 		return fmt.Errorf("%s rate limit reached; try again shortly", c.Name())
+	case http.StatusPaymentRequired:
+		return fmt.Errorf("%s reports no credit on this account", c.provider)
 	}
 	if msg != "" {
 		return fmt.Errorf("%s: %s", c.Name(), msg)
@@ -432,10 +394,10 @@ func (c *Client) explainAPI(status int, msg string) error {
 	return fmt.Errorf("%s: http %d", c.Name(), status)
 }
 
-// parseSuggestions is deliberately strict about structure and forgiving about
-// packaging: models wrap JSON in prose or fences often enough that failing on
-// it would be a bad experience, but regexing commands out of free text would
-// mean executing something we never really parsed.
+// parseSuggestions is strict about structure and forgiving about packaging:
+// models wrap JSON in prose or fences often enough that failing on it would be
+// a bad experience, but regexing commands out of free text would mean executing
+// something we never really parsed.
 func parseSuggestions(content string) ([]resolve.Result, error) {
 	raw := strings.TrimSpace(content)
 	if i := strings.Index(raw, "{"); i >= 0 {
@@ -445,16 +407,20 @@ func parseSuggestions(content string) ([]resolve.Result, error) {
 	}
 
 	var payload struct {
-		Suggestions []suggestion `json:"suggestions"`
+		Suggestions []struct {
+			Command     string `json:"command"`
+			Description string `json:"description"`
+			Tool        string `json:"tool"`
+		} `json:"suggestions"`
 	}
-	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+	if err := jsonUnmarshal([]byte(raw), &payload); err != nil {
 		return nil, fmt.Errorf("model did not return usable JSON: %w", err)
 	}
 
 	out := make([]resolve.Result, 0, len(payload.Suggestions))
 	for _, s := range payload.Suggestions {
 		cmd := strings.TrimSpace(strings.Trim(s.Command, "`"))
-		// A multi-line command cannot be shown in a one-line confirm prompt, so
+		// A multi-line command cannot be shown on a one-line confirm prompt, so
 		// there is no safe way to present it. Drop it rather than truncate.
 		if cmd == "" || strings.ContainsAny(cmd, "\n\r") {
 			continue

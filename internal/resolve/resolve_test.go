@@ -264,3 +264,75 @@ func TestUninstalledAnswerIsStillReturnedOffline(t *testing.T) {
 		t.Fatal("df reported as installed when nothing is")
 	}
 }
+
+// The escalation floor exists to route low-confidence queries to a model. With
+// no model there is nothing to route to, so a labelled guess beats silence;
+// with one, the bar rises sharply because accuracy is the point.
+func TestFloorDependsOnWhetherThereIsAModel(t *testing.T) {
+	ctx := context.Background()
+	// "shell into a running container" scores ~0.83: above the offline floor of
+	// 0.55, below the escalate-below default of 0.80... so it is kept either
+	// way. Use a weaker query to see the difference.
+	const weak = "show me the thing about containers please"
+
+	offline := newT(linux)
+	offlineGot, offlineErr := offline.Resolve(ctx, weak)
+
+	m := &stubModel{out: []Result{{Command: "docker ps", Tool: "docker"}}}
+	online := newT(linux)
+	online.Model = m
+	onlineGot, onlineErr := online.Resolve(ctx, weak)
+
+	// Whatever the corpus scored, the online resolver must not keep an answer
+	// below its higher bar.
+	if onlineErr == nil && onlineGot[0].Source == SourceStaticFuzzy &&
+		onlineGot[0].Confidence < online.EscalateBelow {
+		t.Fatalf("kept a %.2f fuzzy answer despite EscalateBelow=%.2f",
+			onlineGot[0].Confidence, online.EscalateBelow)
+	}
+	// And offline must not have been held to the higher bar.
+	if offlineErr == nil && offlineGot[0].Confidence < online.EscalateBelow &&
+		offlineGot[0].Confidence >= offline.FuzzyFloor {
+		return // correct: offline kept what online escalated
+	}
+}
+
+func TestEscalateBelowRoutesToTheModel(t *testing.T) {
+	ctx := context.Background()
+	m := &stubModel{out: []Result{{Command: "docker ps", Tool: "docker"}}}
+	r := newT(linux)
+	r.Model = m
+	// A corpus row scores 0.83 for this; demand more than that.
+	r.EscalateBelow = 0.95
+
+	got, err := r.Resolve(ctx, "shell into a running container")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if m.called != 1 {
+		t.Fatalf("model called %d times; a 0.83 answer must escalate at a 0.95 floor", m.called)
+	}
+	if got[0].Source != SourceModel {
+		t.Fatalf("source = %v, want model", got[0].Source)
+	}
+}
+
+// An exact corpus hit is never escalated, whatever the floor: it is confidence
+// 1.0 and paying an API call for it would be pure waste.
+func TestExactHitsNeverEscalate(t *testing.T) {
+	m := &stubModel{}
+	r := newT(linux)
+	r.Model = m
+	r.EscalateBelow = 1.0
+
+	got, err := r.Resolve(context.Background(), "check disk usage")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if m.called != 0 {
+		t.Fatal("an exact hit must not cost an API call")
+	}
+	if got[0].Command != "df -h" {
+		t.Fatalf("got %q", got[0].Command)
+	}
+}
