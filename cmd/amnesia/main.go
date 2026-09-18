@@ -10,6 +10,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -229,35 +230,45 @@ func confirm(r resolve.Result, opt options) (bool, error) {
 		return false, nil
 	}
 
-	if !isTerminal() {
-		fmt.Fprintln(os.Stderr, "  "+dim("not a terminal; not running anything"))
-		return false, nil
-	}
-
+	// Order matters. --yes is explicit consent and is the only way to use
+	// amnesia from a script, so it must not require a terminal. A destructive
+	// command needs a typed answer and therefore a human, so --yes never
+	// applies to one and a script simply cannot run it.
 	switch r.Risk {
 	case risk.Destructive:
-		// --yes deliberately does not apply here.
+		if !isTerminal() {
+			fmt.Fprintln(os.Stderr, "  "+dim("destructive, and no terminal to confirm at; not running it"))
+			return false, nil
+		}
 		fmt.Fprintf(os.Stderr, "  %s %s\n", red("DESTRUCTIVE:"), r.RiskReason)
 		fmt.Fprintf(os.Stderr, "  type %q to run, anything else to cancel: ", r.Tool)
-		var typed string
-		fmt.Scanln(&typed)
-		return strings.TrimSpace(typed) == r.Tool && r.Tool != "", nil
+		typed, ok := askLine()
+		return ok && typed == r.Tool && r.Tool != "", nil
+
 	case risk.Caution:
 		if opt.yes {
 			return true, nil
 		}
+		if !isTerminal() {
+			fmt.Fprintln(os.Stderr, "  "+dim("not a terminal; not running anything (pass --yes to consent)"))
+			return false, nil
+		}
 		fmt.Fprintf(os.Stderr, "  %s. Execute? [y/N]: ", r.RiskReason)
-		var answer string
-		fmt.Scanln(&answer)
-		return yes(answer, false), nil
+		answer, ok := askLine()
+		return ok && yes(answer, false), nil
+
 	default:
 		if opt.yes {
 			return true, nil
 		}
+		if !isTerminal() {
+			fmt.Fprintln(os.Stderr, "  "+dim("not a terminal; not running anything (pass --yes to consent)"))
+			return false, nil
+		}
 		fmt.Fprint(os.Stderr, "  Execute? [Y/n]: ")
-		var answer string
-		fmt.Scanln(&answer)
-		return yes(answer, true), nil
+		answer, ok := askLine()
+		// No input at all is not consent, even though the default is yes.
+		return ok && yes(answer, true), nil
 	}
 }
 
@@ -501,11 +512,38 @@ func warn(format string, a ...any) {
 	fmt.Fprintf(os.Stderr, "amnesia: "+format+"\n", a...)
 }
 
-// isTerminal reports whether we can prompt. Without it, `amnesia ... | tee`
-// would hang on a confirm nobody can answer, or worse, take EOF for consent.
+// isTerminal reports whether there is a human who can answer a prompt.
+//
+// The obvious check - is stdin a character device - is wrong, and wrong in the
+// dangerous direction: /dev/null IS a character device. A macOS stress run
+// caught amnesia executing a command under `< /dev/null`, because the prompt
+// read EOF, took the empty answer as the [Y/n] default, and ran it. Every cron
+// job, CI step, systemd unit and Makefile rule invokes programs exactly that
+// way.
+//
+// stdlib has no tty check, and x/term is a dependency this binary does not
+// have. Excluding the null device covers the case that actually bites; the
+// EOF guard in askLine covers the rest.
 func isTerminal() bool {
 	fi, err := os.Stdin.Stat()
-	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+	if err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+		return false
+	}
+	if null, err := os.Stat(os.DevNull); err == nil && os.SameFile(fi, null) {
+		return false
+	}
+	return true
+}
+
+// askLine reads one answer. It distinguishes "the user pressed enter", which
+// means take the default, from "there is no input at all", which must never
+// mean yes no matter what the default is.
+func askLine() (string, bool) {
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && line == "" {
+		return "", false
+	}
+	return strings.TrimSpace(line), true
 }
 
 func color(code, s string) string {
