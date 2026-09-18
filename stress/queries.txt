@@ -1,0 +1,99 @@
+# Golden query set: what a working software engineer actually types.
+#
+# Format:  query ||| expected-substring [|| alternative ...] ||| tag
+# An empty expectation means "no single right answer; scored for plausibility
+# by hand, not by this file".
+#
+# Expectations are substrings of the COMMAND, matched case-insensitively
+# against the top 3 results. They are deliberately loose: "docker ps" is right
+# whether or not it carries --all, and pinning exact flags would make this file
+# a test of the corpus rather than of the resolver.
+
+# --- containers -------------------------------------------------------------
+list running containers ||| docker ps || podman ps ||| docker
+list all containers including stopped ||| docker ps || docker container ls ||| docker
+remove all stopped containers ||| prune ||| docker
+how much disk is docker using ||| docker system df || docker buildx du ||| docker
+follow the logs of a container ||| docker logs || logs -f ||| docker
+open a shell inside a running container ||| exec -it || docker exec ||| docker
+build an image from a dockerfile ||| docker build ||| docker
+remove unused docker images ||| prune ||| docker
+show container resource usage ||| docker stats ||| docker
+stop all running containers ||| docker stop ||| docker
+
+# --- kubernetes -------------------------------------------------------------
+list pods in all namespaces ||| get pods ||| kubectl
+describe a pod ||| describe pod ||| kubectl
+tail the logs of a pod ||| logs ||| kubectl
+restart a deployment ||| rollout restart ||| kubectl
+roll back a deployment ||| rollout undo ||| kubectl
+port forward to a pod ||| port-forward ||| kubectl
+show the current kubernetes context ||| current-context ||| kubectl
+switch kubernetes namespace ||| namespace ||| kubectl
+delete a pod ||| delete pod ||| kubectl
+show node cpu and memory usage ||| top node ||| kubectl
+
+# --- git --------------------------------------------------------------------
+undo the last commit but keep my changes ||| reset --soft ||| git
+discard all my local changes ||| reset --hard || checkout . || restore ||| git
+show me what changed ||| git status || git diff ||| git
+amend the last commit message ||| commit --amend ||| git
+list branches sorted by date ||| committerdate || --sort ||| git
+stash including untracked files ||| stash ||| git
+find out who changed a line ||| blame ||| git
+delete a remote branch ||| push || --delete ||| git
+squash the last three commits ||| rebase ||| git
+show the commit history as a graph ||| log || --graph ||| git
+create and switch to a new branch ||| checkout -b || switch -c ||| git
+see the diff of staged changes ||| diff --staged || diff --cached ||| git
+
+# --- files and search -------------------------------------------------------
+find files larger than 100mb ||| find || -size ||| files
+search for text in files recursively ||| grep || rg ||| files
+find files modified in the last day ||| find || -mtime || -newer ||| files
+replace text across multiple files ||| sed || -i ||| files
+count the lines in a file ||| wc -l ||| files
+show the biggest directories here ||| du ||| files
+follow a log file as it grows ||| tail -f ||| files
+extract a tar gz archive ||| tar || -xzf || -xf ||| files
+create a zip of a folder ||| zip ||| files
+
+# --- network and processes --------------------------------------------------
+show listening ports ||| ||| net
+find what process is using port 8080 ||| ||| net
+kill the process on a port ||| ||| net
+download a file from a url ||| curl || wget ||| net
+send a post request with json ||| curl || -X POST || -d ||| net
+show my public ip address ||| curl || dig ||| net
+check when a domain certificate expires ||| openssl ||| net
+show the top processes by cpu ||| top || ps ||| proc
+
+# --- ssh --------------------------------------------------------------------
+generate an ssh key ||| ssh-keygen ||| ssh
+copy my ssh key to a server ||| ssh-copy-id || scp ||| ssh
+copy a file to a remote server ||| scp || rsync ||| ssh
+
+# --- media ------------------------------------------------------------------
+convert a video to mp4 ||| ffmpeg ||| ffmpeg
+extract the audio from a video ||| ffmpeg ||| ffmpeg
+trim a video without re-encoding ||| ffmpeg ||| ffmpeg
+make a gif from a video ||| ffmpeg ||| ffmpeg
+compress a video file ||| ffmpeg ||| ffmpeg
+
+# --- language tooling -------------------------------------------------------
+list globally installed npm packages ||| npm list || npm ls ||| node
+clear the npm cache ||| npm cache ||| node
+create a python virtual environment ||| venv || virtualenv ||| python
+install python packages from requirements ||| pip install || -r ||| python
+start a simple http server ||| http.server || python || npx ||| python
+show outdated npm packages ||| npm outdated ||| node
+
+# --- data and misc ----------------------------------------------------------
+pretty print a json file ||| jq || json ||| data
+dump a postgres database ||| pg_dump ||| db
+connect to a postgres database ||| psql ||| db
+base64 encode a string ||| base64 ||| data
+generate a uuid ||| uuid ||| data
+watch a command repeatedly ||| watch ||| misc
+show disk space ||| df || disk ||| system
+show memory usage ||| free || vm_stat || memory ||| system

@@ -1,0 +1,34 @@
+name: stress
+
+# Manual, not on every push: it builds a binary and runs ~120 subprocesses per
+# platform. Useful before a release and after any change to the corpus, the
+# scorer or the risk rules.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"   # Monday morning, to catch corpus drift
+
+permissions:
+  contents: read
+
+jobs:
+  stress:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: false
+      - name: build
+        run: go build -trimpath -ldflags "-X main.version=stress" -o amnesia ./cmd/amnesia
+      - name: stress
+        shell: bash
+        run: |
+          bin=./amnesia
+          [ "${{ runner.os }}" = "Windows" ] && bin=./amnesia.exe
+          go run ./stress -bin "$bin" -mode all

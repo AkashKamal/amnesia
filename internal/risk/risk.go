@@ -54,9 +54,24 @@ var rules = []rule{
 	{regexp.MustCompile(`:\(\)\s*\{.*\}\s*;?\s*:`), Destructive, "fork bomb"},
 	{regexp.MustCompile(`\bchmod\s+-R\s+777\b`), Destructive, "removes all permission boundaries"},
 
+	// Windows. amnesia ships for Windows and the corpus carries Windows rows,
+	// so a POSIX-only classifier is half a classifier. A stress run caught
+	// "net stop <service_name>" coming back labelled safe.
+	{regexp.MustCompile(`(?i)\bdiskpart\b`), Destructive, "repartitions a disk"},
+	{regexp.MustCompile(`(?i)\bformat\s+[a-z]:`), Destructive, "formats a drive"},
+	{regexp.MustCompile(`(?i)\b(rd|rmdir)\s+/s`), Destructive, "recursively removes a directory"},
+	{regexp.MustCompile(`(?i)\bdel\s+(/\w+\s+)*/[qsf]`), Destructive, "force deletes files"},
+	{regexp.MustCompile(`(?i)Remove-Item\b[^|]*-Recurse[^|]*-Force`), Destructive, "recursively force deletes"},
+	{regexp.MustCompile(`(?i)\bcipher\s+/w`), Destructive, "wipes free space"},
+	{regexp.MustCompile(`(?i)\breg\s+delete\b`), Destructive, "deletes registry keys"},
+
 	{regexp.MustCompile(`^\s*sudo\b`), Caution, "runs as root"},
 	{regexp.MustCompile(`\brm\b`), Caution, "deletes files"},
 	{regexp.MustCompile(`\b(systemctl|service)\s+(stop|restart|disable)\b`), Caution, "stops or restarts a service"},
+	{regexp.MustCompile(`(?i)\b(net|sc)\s+(stop|start|delete|config)\b`), Caution, "changes a Windows service"},
+	{regexp.MustCompile(`(?i)\btaskkill\b`), Caution, "terminates processes"},
+	{regexp.MustCompile(`(?i)\bStop-(Process|Service|Computer)\b`), Caution, "stops a process, service or machine"},
+	{regexp.MustCompile(`(?i)\b(shutdown|reboot)\b`), Caution, "shuts down or reboots"},
 	{regexp.MustCompile(`\bkubectl\s+(apply|rollout|scale|drain|cordon)\b`), Caution, "mutates cluster state"},
 	{regexp.MustCompile(`\b(kill|pkill|killall|fuser\s+-k)\b`), Caution, "terminates processes"},
 	{regexp.MustCompile(`\b(iptables|ufw|firewall-cmd)\b`), Caution, "changes firewall rules"},

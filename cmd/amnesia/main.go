@@ -28,6 +28,7 @@ import (
 	"github.com/AkashKamal/amnesia/internal/resolve"
 	"github.com/AkashKamal/amnesia/internal/risk"
 	"github.com/AkashKamal/amnesia/internal/store"
+	"github.com/AkashKamal/amnesia/internal/toolpath"
 )
 
 // Set via -ldflags at release time.
@@ -131,6 +132,12 @@ func run() int {
 
 func resolveAndRun(query string, opt options) int {
 	r := resolve.New(detectEnv())
+
+	// A cached PATH index, rather than resolve's per-tool exec.LookPath. On WSL
+	// the naive version cost 5.9s per query; see internal/toolpath.
+	if dir, err := config.Dir(); err == nil {
+		r.HasTool = toolpath.Has(dir)
+	}
 
 	var cache *store.Cache
 	if !opt.noCache {

@@ -219,9 +219,41 @@ func placeholders(cmd string) string {
 			return b.String()
 		}
 		b.WriteString(cmd[:i])
-		b.WriteString("<" + slug(cmd[i+2:i+j]) + ">")
+		b.WriteString(render(cmd[i+2 : i+j]))
 		cmd = cmd[i+j+2:]
 	}
+}
+
+// render turns one {{...}} group into text.
+//
+// tldr overloads the braces. {{path/to/file}} is a value the user supplies, but
+// {{-l|--lines}} and {{exec|container exec}} are a choice between literal flags
+// or subcommands. Treating the second kind as a placeholder produced commands
+// like "docker <exec-container-exec> <it-interactive-tty> <container_name>",
+// which is not a command at all - it was the single worst corpus defect the
+// stress run found.
+//
+// A pipe means alternatives: take the first, which is the short form tldr lists
+// first, and emit it literally. A leading dash means a flag, likewise literal.
+// Everything else is a value the user has to fill in.
+func render(inner string) string {
+	// The real notation is {{[-l|--lines]}}: brackets inside the braces. Strip
+	// them before anything else, or "[-l" fails the leading-dash test and comes
+	// out as the placeholder <l>.
+	inner = strings.TrimSpace(inner)
+	inner = strings.TrimPrefix(inner, "[")
+	inner = strings.TrimSuffix(inner, "]")
+	if alt, _, ok := strings.Cut(inner, "|"); ok {
+		inner = strings.TrimSpace(alt)
+	}
+	inner = strings.Trim(inner, "[]")
+	if inner == "" {
+		return "<value>"
+	}
+	if strings.HasPrefix(inner, "-") {
+		return inner
+	}
+	return "<" + slug(inner) + ">"
 }
 
 func slug(s string) string {

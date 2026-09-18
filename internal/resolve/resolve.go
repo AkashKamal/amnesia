@@ -23,6 +23,7 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -154,21 +155,44 @@ func (r *Resolver) installed(tool string) bool {
 	return r.HasTool(tool)
 }
 
-// preferInstalled stable-sorts runnable commands ahead of ones whose tool is
-// missing, and records which is which. Order within each group is preserved, so
-// the score ranking still decides among things you can actually run.
+// uninstalledPenalty discounts a candidate whose tool is missing.
+//
+// It is a discount and not a demotion. Sorting every installed row above every
+// uninstalled one sounds right and is not: it let "compress a video file"
+// answer zmore, scoring 0.67 and installed, over ffmpeg scoring 0.90. At 0.8 a
+// clearly-better absent tool still wins, while two comparable candidates break
+// toward the one you can actually run - which is the whole point on Windows,
+// where the corpus is full of Unix tools.
+const uninstalledPenalty = 0.8
+
+// preferInstalled re-ranks by discounted score and records what is runnable.
+// Confidence keeps the raw match score: the discount decides order, but telling
+// the user "58%" when the row matched at 72% would be a lie about the match.
 func (r *Resolver) preferInstalled(in []Result) []Result {
-	out := make([]Result, 0, len(in))
-	var missing []Result
-	for _, res := range in {
-		res.Installed = r.installed(res.Tool)
-		if res.Installed {
-			out = append(out, res)
-		} else {
-			missing = append(missing, res)
-		}
+	type scored struct {
+		res       Result
+		effective float64
 	}
-	return append(out, missing...)
+
+	list := make([]scored, len(in))
+	for i, res := range in {
+		res.Installed = r.installed(res.Tool)
+		eff := res.Confidence
+		if !res.Installed {
+			eff *= uninstalledPenalty
+		}
+		list[i] = scored{res, eff}
+	}
+
+	// Stable, so equal scores keep corpus order: overrides before generated
+	// rows, and the generator's deterministic ordering below that.
+	sort.SliceStable(list, func(i, j int) bool { return list[i].effective > list[j].effective })
+
+	out := make([]Result, len(list))
+	for i, s := range list {
+		out[i] = s.res
+	}
+	return out
 }
 
 // Resolve runs the cascade, returning as soon as a stage is confident.
@@ -200,11 +224,13 @@ func (r *Resolver) Resolve(ctx context.Context, query string) ([]Result, error) 
 		}
 	}
 
-	if out := r.fuzzy(key); len(out) > 0 && out[0].Confidence >= r.FuzzyFloor {
-		// An exact-but-uninstalled match still describes the intent better than
-		// a fuzzy-and-uninstalled one, so only displace it with something
-		// runnable.
-		if out[0].Installed || best == nil {
+	// An exact match is the user naming a documented task in its own words. No
+	// fuzzy result outranks that, installed or not: told "kubectl get pods -A
+	// (kubectl is not installed)", a user learns what to install. Told "lsns",
+	// they learn nothing. Only the model, which can answer for this specific
+	// machine, gets to displace it.
+	if best == nil {
+		if out := r.fuzzy(key); len(out) > 0 && out[0].Confidence >= r.FuzzyFloor {
 			return r.finish(out, start), nil
 		}
 	}
