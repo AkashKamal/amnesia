@@ -24,11 +24,13 @@ jobs:
         with:
           go-version: stable
           cache: false
-      - name: build
-        run: go build -trimpath -ldflags "-X main.version=stress" -o amnesia ./cmd/amnesia
-      - name: stress
+      # go build -o writes the name verbatim, so on Windows the output has no
+      # .exe and cannot be executed. Name it per platform rather than guessing
+      # afterwards.
+      - name: build and stress
         shell: bash
         run: |
           bin=./amnesia
           [ "${{ runner.os }}" = "Windows" ] && bin=./amnesia.exe
+          go build -trimpath -ldflags "-X main.version=stress" -o "$bin" ./cmd/amnesia
           go run ./stress -bin "$bin" -mode all
