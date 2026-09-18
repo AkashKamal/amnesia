@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -56,6 +57,11 @@ var (
 	bin     = flag.String("bin", "amnesia", "path to the amnesia binary under test")
 	mode    = flag.String("mode", "all", "accuracy | robustness | safety | concurrency | all")
 	verbose = flag.Bool("v", false, "print every query result, not just failures")
+	online  = flag.Bool("online", false, "let the model answer; uses -config for credentials and makes real API calls")
+	cfgFrom = flag.String("config", "", "copy this amnesia config into the scratch home (for -online)")
+	floor   = flag.Float64("floor", 0, "override --min-confidence, the corpus confidence needed to answer locally")
+	twice   = flag.Bool("twice", false, "run the set a second time and report what the cache absorbed")
+	delay   = flag.Duration("delay", 0, "pause between queries; free API tiers rate-limit well below full speed")
 	home    string
 )
 
@@ -68,6 +74,19 @@ func main() {
 	}
 	defer os.RemoveAll(dir)
 	home = dir
+
+	// A scratch home keeps the run out of the user's real cache, so the numbers
+	// are about amnesia and not about what they happened to ask yesterday.
+	// Credentials are copied in rather than shared.
+	if *cfgFrom != "" {
+		b, err := os.ReadFile(*cfgFrom)
+		if err != nil {
+			fatal(fmt.Errorf("reading -config %s: %w", *cfgFrom, err))
+		}
+		if err := os.WriteFile(filepath.Join(dir, "config"), b, 0o600); err != nil {
+			fatal(err)
+		}
+	}
 
 	if _, err := exec.LookPath(*bin); err != nil {
 		if _, statErr := os.Stat(*bin); statErr != nil {
@@ -121,12 +140,16 @@ func platform() string {
 // ask runs one query. Offline, and against a scratch home, so the measurement
 // is of the corpus and resolver rather than of somebody's cache or API key.
 func ask(args ...string) run {
+	if *floor > 0 {
+		// Flags must precede the query, which is positional.
+		args = append([]string{"--min-confidence", strconv.FormatFloat(*floor, 'f', 2, 64)}, args...)
+	}
 	cmd := exec.Command(*bin, args...)
-	cmd.Env = append(os.Environ(),
-		"AMNESIA_OFFLINE=1",
-		"AMNESIA_HOME="+home,
-		"NO_COLOR=1",
-	)
+	env := append(os.Environ(), "AMNESIA_HOME="+home, "NO_COLOR=1")
+	if !*online {
+		env = append(env, "AMNESIA_OFFLINE=1")
+	}
+	cmd.Env = env
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -233,6 +256,8 @@ func accuracy() bool {
 		correct bool
 	}
 	var samples []sample
+	firstSource := map[string]string{}
+	var apiLatency []time.Duration
 
 	var (
 		hit1, hit3, scored, noAnswer int
@@ -247,6 +272,9 @@ func accuracy() bool {
 	fmt.Printf("\n## accuracy  (%d queries, offline, no model)\n\n", len(queries))
 
 	for _, q := range queries {
+		if *delay > 0 {
+			time.Sleep(*delay)
+		}
 		r := ask(append([]string{"--json"}, strings.Fields(q.text)...)...)
 		durations = append(durations, r.took)
 
@@ -266,6 +294,10 @@ func accuracy() bool {
 
 		top := r.results[0]
 		bySource[top.Source]++
+		firstSource[q.text] = top.Source
+		if top.Source == "model" {
+			apiLatency = append(apiLatency, r.took)
+		}
 		if !top.Installed {
 			uninstalledTop++
 		}
@@ -366,6 +398,56 @@ func accuracy() bool {
 			mark = "  <- previous default"
 		}
 		fmt.Printf("    %.2f    %-11d %-11d %d%s\n", f, keptRight, keptWrong, escalated, mark)
+	}
+
+	// Second pass. The cache's entire job is to make a paid answer free
+	// exactly once, so the number that matters is: of the queries the model
+	// answered, how many now come back from disk?
+	if *twice {
+		fmt.Printf("\n  second pass (cache behaviour)\n")
+		var wasModel, nowCached, nowModel int
+		var cachedLatency []time.Duration
+		for _, q := range queries {
+			// The second pass should be served from disk, so no delay is
+			// needed - and if one is, that itself is the finding.
+			r := ask(append([]string{"--json"}, strings.Fields(q.text)...)...)
+			if len(r.results) == 0 {
+				continue
+			}
+			src := r.results[0].Source
+			if firstSource[q.text] != "model" {
+				continue
+			}
+			wasModel++
+			switch src {
+			case "cache":
+				nowCached++
+				cachedLatency = append(cachedLatency, r.took)
+			case "model":
+				nowModel++
+			}
+		}
+		if wasModel == 0 {
+			fmt.Printf("    nothing reached the model on the first pass; nothing to cache\n")
+		} else {
+			fmt.Printf("    model answers on pass 1      %d\n", wasModel)
+			fmt.Printf("    served from cache on pass 2  %d  (%d%%)\n", nowCached, nowCached*100/wasModel)
+			fmt.Printf("    called the API again         %d\n", nowModel)
+			if len(cachedLatency) > 0 {
+				sort.Slice(cachedLatency, func(i, j int) bool { return cachedLatency[i] < cachedLatency[j] })
+				med := cachedLatency[len(cachedLatency)/2]
+				fmt.Printf("    cached answer latency (p50)  %v\n", med.Round(time.Millisecond))
+			}
+		}
+	}
+
+	if len(apiLatency) > 0 {
+		sort.Slice(apiLatency, func(i, j int) bool { return apiLatency[i] < apiLatency[j] })
+		n := len(apiLatency)
+		fmt.Printf("\n  API-answered queries: %d   latency p50 %v  p90 %v  max %v\n",
+			n, apiLatency[n/2].Round(time.Millisecond),
+			apiLatency[min(n*90/100, n-1)].Round(time.Millisecond),
+			apiLatency[n-1].Round(time.Millisecond))
 	}
 
 	sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })

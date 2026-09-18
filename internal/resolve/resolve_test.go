@@ -336,3 +336,48 @@ func TestExactHitsNeverEscalate(t *testing.T) {
 		t.Fatalf("got %q", got[0].Command)
 	}
 }
+
+type failingModel struct{ called int }
+
+func (m *failingModel) Name() string { return "failing" }
+func (m *failingModel) Suggest(context.Context, string, Env) ([]Result, error) {
+	m.called++
+	return nil, errors.New("rate limit reached")
+}
+
+// A rate limit is routine on a free tier. Escalation failing must not turn a
+// usable local answer into no answer at all - that reads as "amnesia is
+// broken" when the corpus knew something perfectly serviceable.
+func TestModelFailureFallsBackToTheLocalAnswer(t *testing.T) {
+	m := &failingModel{}
+	var reported error
+
+	r := newT(linux)
+	r.Model = m
+	r.OnModelError = func(err error) { reported = err }
+	r.EscalateBelow = 0.99 // force escalation on a query the corpus can answer
+
+	got, err := r.Resolve(context.Background(), "shell into a running container")
+	if err != nil {
+		t.Fatalf("resolve returned an error instead of the local answer: %v", err)
+	}
+	if m.called != 1 {
+		t.Fatalf("model called %d times, want 1", m.called)
+	}
+	if got[0].Tool != "docker" {
+		t.Fatalf("got %q, want the corpus answer", got[0].Command)
+	}
+	// The user must be told the model failed, not silently given a weaker answer.
+	if reported == nil {
+		t.Fatal("OnModelError was not called; the failure would be invisible")
+	}
+}
+
+// With nothing local either, the model's error is the honest thing to return.
+func TestModelFailureWithNoLocalAnswerReturnsTheError(t *testing.T) {
+	r := newT(linux)
+	r.Model = &failingModel{}
+	if _, err := r.Resolve(context.Background(), nonsense); err == nil {
+		t.Fatal("want the provider error when there is nothing to fall back to")
+	}
+}

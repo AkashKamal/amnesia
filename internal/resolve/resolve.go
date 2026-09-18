@@ -122,6 +122,12 @@ type Resolver struct {
 	// free of any opinion about how to display it.
 	OnModelCall func(name string)
 
+	// OnModelError is invoked when the model stage fails - a rate limit, an
+	// outage, a bad key. Escalation failing must not mean the user gets
+	// nothing, so the cascade falls back to its best local answer; this is how
+	// the CLI tells them that is what happened.
+	OnModelError func(err error)
+
 	// HasTool reports whether an executable is on PATH. nil means "assume yes",
 	// which is what tests want; New wires up the real check.
 	//
@@ -254,19 +260,25 @@ func (r *Resolver) Resolve(ctx context.Context, query string) ([]Result, error) 
 	// (kubectl is not installed)", a user learns what to install. Told "lsns",
 	// they learn nothing. Only the model, which can answer for this specific
 	// machine, gets to displace it.
+	// fuzzyBest is the strongest local answer, kept even when it sits below the
+	// escalation bar. If the model then fails, it is far better than nothing.
+	var fuzzyBest []Result
 	if best == nil {
-		if out := r.fuzzy(key); len(out) > 0 && out[0].Confidence >= r.floor() {
-			return r.finish(out, start), nil
+		if out := r.fuzzy(key); len(out) > 0 {
+			if out[0].Confidence >= r.floor() {
+				return r.finish(out, start), nil
+			}
+			fuzzyBest = out
 		}
 	}
 
 	if r.Model == nil {
 		// Offline: a low-confidence answer, clearly labelled, beats nothing.
-		if out := r.fuzzy(key); len(out) > 0 && out[0].Confidence >= r.FuzzyFloor && best == nil {
-			return r.finish(out, start), nil
-		}
 		if best != nil {
 			return r.finish(best, start), nil
+		}
+		if len(fuzzyBest) > 0 && fuzzyBest[0].Confidence >= r.FuzzyFloor {
+			return r.finish(fuzzyBest, start), nil
 		}
 		return nil, ErrNoMatch
 	}
@@ -275,12 +287,19 @@ func (r *Resolver) Resolve(ctx context.Context, query string) ([]Result, error) 
 	}
 	out, err := r.Model.Suggest(ctx, query, r.Env)
 	if err != nil || len(out) == 0 {
-		// A provider outage should not throw away a real answer we already
-		// have, even if its tool is missing here.
-		if best != nil {
-			return r.finish(best, start), nil
+		// Escalation failing - a rate limit, an outage, an expired key - must
+		// not turn a usable local answer into no answer at all. Rate limits in
+		// particular are routine on a free tier, and "amnesia stopped working"
+		// is the wrong thing for a user to conclude from one.
+		if err != nil && r.OnModelError != nil {
+			r.OnModelError(err)
 		}
-		if err != nil {
+		switch {
+		case best != nil:
+			return r.finish(best, start), nil
+		case len(fuzzyBest) > 0:
+			return r.finish(fuzzyBest, start), nil
+		case err != nil:
 			return nil, err
 		}
 		return nil, ErrNoMatch

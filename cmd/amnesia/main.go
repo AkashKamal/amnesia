@@ -168,6 +168,11 @@ func resolveAndRun(query string, opt options) int {
 	if !opt.offline {
 		if m := model.New(cfg); m != nil {
 			r.Model = m
+			r.OnModelError = func(err error) {
+				// Say what happened, then show the local answer anyway.
+				fmt.Fprintf(os.Stderr, "  %s\n", dim(err.Error()))
+				fmt.Fprintf(os.Stderr, "  %s\n", dim("falling back to the best local match"))
+			}
 			r.OnModelCall = func(name string) {
 				if opt.asJSON {
 					return // never contaminate machine-readable output
