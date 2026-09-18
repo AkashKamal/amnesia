@@ -39,9 +39,29 @@ func (c mapCache) Put(_ context.Context, key, platform string, r Result) error {
 
 var linux = Env{Platform: "linux", Shell: "bash"}
 
+// newT builds a resolver that believes every tool is installed. Without this,
+// results would depend on what happens to be on the CI runner: the docker test
+// would pass on a machine with docker and fail on one without.
+func newT(env Env) *Resolver {
+	r := New(env)
+	r.HasTool = func(string) bool { return true }
+	return r
+}
+
+// newTWith builds a resolver where only the named tools exist.
+func newTWith(env Env, tools ...string) *Resolver {
+	have := make(map[string]bool, len(tools))
+	for _, t := range tools {
+		have[t] = true
+	}
+	r := New(env)
+	r.HasTool = func(t string) bool { return have[t] }
+	return r
+}
+
 func TestExactHitNeverReachesTheModel(t *testing.T) {
 	m := &stubModel{}
-	r := New(linux)
+	r := newT(linux)
 	r.Model = m
 
 	got, err := r.Resolve(context.Background(), "How do I check disk usage?")
@@ -67,7 +87,7 @@ func TestPlatformFiltering(t *testing.T) {
 		{"linux", "ss"},
 		{"osx", "lsof"},
 	} {
-		got, err := New(Env{Platform: tc.platform}).Resolve(context.Background(), "show listening ports")
+		got, err := newT(Env{Platform: tc.platform}).Resolve(context.Background(), "show listening ports")
 		if err != nil {
 			t.Fatalf("%s: %v", tc.platform, err)
 		}
@@ -79,7 +99,7 @@ func TestPlatformFiltering(t *testing.T) {
 
 func TestFuzzyAnswersARewordedQuery(t *testing.T) {
 	m := &stubModel{}
-	r := New(linux)
+	r := newT(linux)
 	r.Model = m
 
 	// Not a phrase in any row: "a" and "running" are extra, and word order
@@ -103,7 +123,7 @@ func TestModelMissIsCached(t *testing.T) {
 	ctx := context.Background()
 	m := &stubModel{out: []Result{{Command: "frob --quux", Desc: "frobnicate"}}}
 	cache := mapCache{}
-	r := New(linux)
+	r := newT(linux)
 	r.Model, r.Cache = m, cache
 
 	if _, err := r.Resolve(ctx, nonsense); err != nil {
@@ -122,14 +142,14 @@ func TestModelMissIsCached(t *testing.T) {
 }
 
 func TestOfflineFailsInsteadOfGuessing(t *testing.T) {
-	_, err := New(linux).Resolve(context.Background(), nonsense)
+	_, err := newT(linux).Resolve(context.Background(), nonsense)
 	if !errors.Is(err, ErrNoMatch) {
 		t.Fatalf("err = %v, want ErrNoMatch", err)
 	}
 }
 
 func TestEveryResultIsRiskClassified(t *testing.T) {
-	got, err := New(linux).Resolve(context.Background(), "remove unused images and volumes")
+	got, err := newT(linux).Resolve(context.Background(), "remove unused images and volumes")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -144,7 +164,7 @@ func TestEveryResultIsRiskClassified(t *testing.T) {
 // A model answer must be classified too: the model is the least trustworthy
 // source in the cascade, so it must not be the one that skips the safety check.
 func TestModelResultsAreRiskClassified(t *testing.T) {
-	r := New(linux)
+	r := newT(linux)
 	r.Model = &stubModel{out: []Result{{Command: "rm -rf /var/lib/thing", Tool: "rm"}}}
 
 	got, err := r.Resolve(context.Background(), nonsense)
@@ -157,7 +177,7 @@ func TestModelResultsAreRiskClassified(t *testing.T) {
 }
 
 func TestMaxResultsIsHonoured(t *testing.T) {
-	r := New(linux)
+	r := newT(linux)
 	r.MaxResults = 1
 	r.Model = &stubModel{out: []Result{{Command: "a"}, {Command: "b"}, {Command: "c"}}}
 
@@ -172,7 +192,7 @@ func TestMaxResultsIsHonoured(t *testing.T) {
 
 func BenchmarkExact(b *testing.B) {
 	ctx := context.Background()
-	r := New(linux)
+	r := newT(linux)
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		if _, err := r.Resolve(ctx, "check disk usage"); err != nil {
@@ -183,9 +203,64 @@ func BenchmarkExact(b *testing.B) {
 
 func BenchmarkFuzzyMiss(b *testing.B) {
 	ctx := context.Background()
-	r := New(linux)
+	r := newT(linux)
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		_, _ = r.Resolve(ctx, "shell into a running container")
+	}
+}
+
+// A command for a tool this machine does not have is not an answer. This is the
+// bug that made Windows useless in the first build: tldr's "common" platform is
+// really "common across Unix-likes", so amnesia cheerfully offered df, lsof and
+// aconnect on a machine that had none of them.
+func TestUninstalledToolsRankBelowInstalledOnes(t *testing.T) {
+	// Only git exists. "show what changed" should still find git status rather
+	// than some Unix tool that scores similarly.
+	r := newTWith(linux, "git")
+	got, err := r.Resolve(context.Background(), "show what changed")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if !got[0].Installed {
+		t.Fatalf("top result %q (%s) is not installed", got[0].Command, got[0].Tool)
+	}
+	if got[0].Tool != "git" {
+		t.Fatalf("tool = %q, want git (the only installed tool)", got[0].Tool)
+	}
+}
+
+func TestExactMatchForAMissingToolDoesNotEndTheCascade(t *testing.T) {
+	// "check disk usage" exact-matches the curated df row. With no df on the
+	// machine and a model available, the model must still be consulted.
+	m := &stubModel{out: []Result{{Command: "Get-PSDrive", Tool: "powershell"}}}
+	r := newTWith(Env{Platform: "windows", Shell: "powershell"}, "powershell")
+	r.Model = m
+
+	got, err := r.Resolve(context.Background(), "check disk usage")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if m.called != 1 {
+		t.Fatalf("model called %d times; an uninstalled exact hit must not end the cascade", m.called)
+	}
+	if got[0].Command != "Get-PSDrive" {
+		t.Fatalf("got %q, want the model answer for an installed tool", got[0].Command)
+	}
+}
+
+func TestUninstalledAnswerIsStillReturnedOffline(t *testing.T) {
+	// Nothing installed, no model. Returning the df row flagged Installed=false
+	// is more useful than ErrNoMatch - the user learns what to install.
+	r := newTWith(linux)
+	got, err := r.Resolve(context.Background(), "check disk usage")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if got[0].Command != "df -h" {
+		t.Fatalf("got %q, want df -h", got[0].Command)
+	}
+	if got[0].Installed {
+		t.Fatal("df reported as installed when nothing is")
 	}
 }

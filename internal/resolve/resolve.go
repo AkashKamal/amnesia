@@ -5,10 +5,13 @@
 // Nothing below the embedded corpus is touched unless the stage above it
 // misses, so the common case never opens a file, a socket or a database.
 //
-//  1. Static exact   embedded corpus, binary search     ~50us, offline
-//  2. Learned exact  on-disk cache of past resolutions  ~3ms,  offline
-//  3. Static fuzzy   linear scan + token scoring        ~5ms,  offline
+//  1. Static exact   embedded corpus, binary search     ~2ms,  offline
+//  2. Learned exact  on-disk cache of past resolutions  ~2ms,  offline
+//  3. Static fuzzy   linear scan + token scoring        ~13ms, offline
 //  4. Model          Groq / Ollama / OpenAI-shaped API  ~300ms-2s, network
+//
+// A stage also declines when the tool it would name is not installed here; see
+// HasTool. Stage 1 of the cascade is cheap, not authoritative.
 //
 // A model answer is written back to the learned cache, so any given query is
 // slow at most once. Stage 4 is the only stage that can leave the machine, and
@@ -19,6 +22,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -49,6 +53,10 @@ type Result struct {
 	Risk       risk.Level
 	RiskReason string
 	Elapsed    time.Duration
+
+	// Installed reports whether Tool was found on PATH. A command for a tool
+	// you do not have is not an answer, so callers must not offer to run one.
+	Installed bool
 }
 
 // Env is the machine we are resolving for. Captured once per invocation;
@@ -94,10 +102,67 @@ type Resolver struct {
 	// MaxResults caps what we show. Past a handful the user is reading a menu
 	// instead of confirming a command.
 	MaxResults int
+
+	// HasTool reports whether an executable is on PATH. nil means "assume yes",
+	// which is what tests want; New wires up the real check.
+	//
+	// This exists because the corpus platform tag is not enough. tldr's
+	// "common" really means "common across Unix-likes", so on Windows it will
+	// happily offer df, lsof and aconnect. Ranking by what is actually
+	// installed fixes that, and it also stops a machine with docker but not
+	// podman from being shown podman.
+	HasTool func(tool string) bool
 }
 
 func New(env Env) *Resolver {
-	return &Resolver{Env: env, Cache: NopCache{}, FuzzyFloor: 0.55, MaxResults: 3}
+	return &Resolver{
+		Env:        env,
+		Cache:      NopCache{},
+		FuzzyFloor: 0.55,
+		MaxResults: 3,
+		HasTool:    lookPath(),
+	}
+}
+
+// lookPath returns a memoized PATH check. Memoized because the same tool shows
+// up across many candidate rows and each miss is a full PATH walk.
+func lookPath() func(string) bool {
+	seen := map[string]bool{}
+	return func(tool string) bool {
+		if tool == "" {
+			return true // unknown, so do not penalise it
+		}
+		if v, ok := seen[tool]; ok {
+			return v
+		}
+		_, err := exec.LookPath(tool)
+		seen[tool] = err == nil
+		return err == nil
+	}
+}
+
+func (r *Resolver) installed(tool string) bool {
+	if r.HasTool == nil {
+		return true
+	}
+	return r.HasTool(tool)
+}
+
+// preferInstalled stable-sorts runnable commands ahead of ones whose tool is
+// missing, and records which is which. Order within each group is preserved, so
+// the score ranking still decides among things you can actually run.
+func (r *Resolver) preferInstalled(in []Result) []Result {
+	out := make([]Result, 0, len(in))
+	var missing []Result
+	for _, res := range in {
+		res.Installed = r.installed(res.Tool)
+		if res.Installed {
+			out = append(out, res)
+		} else {
+			missing = append(missing, res)
+		}
+	}
+	return append(out, missing...)
 }
 
 // Resolve runs the cascade, returning as soon as a stage is confident.
@@ -108,30 +173,52 @@ func (r *Resolver) Resolve(ctx context.Context, query string) ([]Result, error) 
 		return nil, ErrNoMatch
 	}
 
+	// best holds the strongest answer found so far whose tool is not installed.
+	// A missing tool does not end the cascade - a later stage may know a command
+	// for something this machine actually has - but it beats returning nothing.
+	var best []Result
+
 	if out := toResults(corpus.Lookup(key, r.Env.Platform), SourceStaticExact, 1); len(out) > 0 {
-		return r.finish(out, start), nil
+		out = r.preferInstalled(out)
+		if out[0].Installed {
+			return r.finish(out, start), nil
+		}
+		best = out
 	}
 
 	if r.Cache != nil {
 		// A cache error is reported by the caller and otherwise ignored on
 		// purpose: it must not block a resolution the model can still answer.
 		if out, err := r.Cache.Get(ctx, key, r.Env.Platform); err == nil && len(out) > 0 {
-			return r.finish(out, start), nil
+			return r.finish(r.preferInstalled(out), start), nil
 		}
 	}
 
 	if out := r.fuzzy(key); len(out) > 0 && out[0].Confidence >= r.FuzzyFloor {
-		return r.finish(out, start), nil
+		// An exact-but-uninstalled match still describes the intent better than
+		// a fuzzy-and-uninstalled one, so only displace it with something
+		// runnable.
+		if out[0].Installed || best == nil {
+			return r.finish(out, start), nil
+		}
 	}
 
 	if r.Model == nil {
+		if best != nil {
+			return r.finish(best, start), nil
+		}
 		return nil, ErrNoMatch
 	}
 	out, err := r.Model.Suggest(ctx, query, r.Env)
-	if err != nil {
-		return nil, err
-	}
-	if len(out) == 0 {
+	if err != nil || len(out) == 0 {
+		// A provider outage should not throw away a real answer we already
+		// have, even if its tool is missing here.
+		if best != nil {
+			return r.finish(best, start), nil
+		}
+		if err != nil {
+			return nil, err
+		}
 		return nil, ErrNoMatch
 	}
 	for i := range out {
@@ -174,6 +261,7 @@ func (r *Resolver) finish(out []Result, start time.Time) []Result {
 	elapsed := time.Since(start)
 	for i := range out {
 		out[i].Risk, out[i].RiskReason = risk.Classify(out[i].Command)
+		out[i].Installed = r.installed(out[i].Tool)
 		out[i].Elapsed = elapsed
 	}
 	return out
@@ -200,7 +288,16 @@ func (r *Resolver) fuzzy(key string) []Result {
 		limit = 3
 	}
 
-	cands := corpus.Best(r.Env.Platform, limit, func(phrase, tool []byte) float64 {
+	// Over-fetch, then rank installed tools first. Taking only `limit` from the
+	// scan would hand back three commands for tools this machine does not have
+	// and never look at the runnable fourth. The extra rows cost a PATH lookup
+	// each, memoized, on a path that already scans 30k rows.
+	over := limit * 8
+	if over < 24 {
+		over = 24
+	}
+
+	cands := corpus.Best(r.Env.Platform, over, func(phrase, tool []byte) float64 {
 		return score(qt, phrase, tool)
 	})
 
@@ -210,6 +307,11 @@ func (r *Resolver) fuzzy(key string) []Result {
 			Command: c.Entry.Command, Desc: c.Entry.Desc, Tool: c.Entry.Tool,
 			Source: SourceStaticFuzzy, Confidence: c.Score,
 		})
+	}
+
+	out = r.preferInstalled(out)
+	if len(out) > limit {
+		out = out[:limit]
 	}
 	return out
 }

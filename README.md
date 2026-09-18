@@ -94,6 +94,9 @@ Three rules, no exceptions:
   A reflexive `y` is how people lose clusters.
 - **Commands with `<placeholders>` are never offered.** Amnesia will not guess
   your pod name.
+- **Commands for tools you don't have are never offered.** Amnesia checks PATH
+  and ranks what you can actually run first, then tells you plainly when the
+  best answer needs something you haven't installed.
 
 ## Using a model (optional)
 

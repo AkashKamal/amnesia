@@ -187,6 +187,12 @@ func resolveAndRun(query string, opt options) int {
 // cluster. Commands with placeholders are never offered at all - amnesia does
 // not guess a container name on your behalf.
 func confirm(r resolve.Result, opt options) (bool, error) {
+	if !r.Installed {
+		// Offering to run a tool that is not here just produces a confusing
+		// shell error two keystrokes later.
+		fmt.Fprintf(os.Stderr, "  %s\n", dim(r.Tool+" is not installed on this machine - nothing to run"))
+		return false, nil
+	}
 	if placeholder.MatchString(r.Command) {
 		fmt.Fprintln(os.Stderr, "  "+dim("fill in the <placeholders> and run it yourself"))
 		return false, nil
@@ -259,10 +265,11 @@ func printJSON(results []resolve.Result) int {
 		Confidence float64 `json:"confidence"`
 		Risk       string  `json:"risk"`
 		RiskReason string  `json:"risk_reason,omitempty"`
+		Installed  bool    `json:"installed"`
 	}
 	list := make([]out, 0, len(results))
 	for _, r := range results {
-		list = append(list, out{r.Command, r.Desc, r.Tool, r.Source.String(), r.Confidence, r.Risk.String(), r.RiskReason})
+		list = append(list, out{r.Command, r.Desc, r.Tool, r.Source.String(), r.Confidence, r.Risk.String(), r.RiskReason, r.Installed})
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
