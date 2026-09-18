@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -70,8 +71,12 @@ func TestChangingModelKeepsTheSavedKey(t *testing.T) {
 }
 
 func TestConfigFileIsNotWorldReadable(t *testing.T) {
-	if os.Getenv("GOOS") == "windows" {
-		t.Skip("POSIX permission bits do not apply")
+	if runtime.GOOS == "windows" {
+		// Windows has no POSIX mode bits; Go reports 666 regardless. The file
+		// lands under the user's profile directory, whose default ACL is
+		// already user-scoped. Tightening it further needs the Windows security
+		// APIs and is not worth a syscall dependency here.
+		t.Skip("POSIX permission bits do not apply on Windows")
 	}
 	dir := t.TempDir()
 	t.Setenv("AMNESIA_HOME", dir)
