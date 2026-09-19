@@ -1,9 +1,5 @@
 // Command amnesia resolves natural language to a shell command, offline first.
 //
-// v0.1 is the CLI only. `daemon`, `mcp` and `recall` are reserved here so the
-// command surface does not change under users when the memory layer lands; see
-// docs/ARCHITECTURE.md.
-//
 // The import graph is the latency budget: this package and internal/resolve
 // must not reach anything that opens a file or a socket at startup. CI enforces
 // it.
@@ -128,10 +124,6 @@ func run() int {
 		return modelCmd(args[1:])
 	case "forget":
 		return forget()
-	case "daemon", "mcp", "recall", "service":
-		fmt.Fprintf(os.Stderr, "amnesia: %q is part of the memory layer, landing in v0.2.\n"+
-			"Follow https://github.com/AkashKamal/amnesia for progress.\n", args[0])
-		return 1
 	}
 
 	return resolveAndRun(strings.Join(args, " "), opt)

@@ -1,11 +1,10 @@
 // Package store persists resolutions the model had to be paid for, so any
 // given query is slow at most once.
 //
-// This is an append-only JSONL file, not a database. v0.1 has no memory layer
-// and therefore nothing that needs full-text search, transactions or
-// concurrent writers - and a JSONL file keeps the binary at zero external
-// dependencies, which is the whole distribution story. SQLite arrives in v0.2
-// with the memory store, where FTS5 actually earns its weight.
+// This is an append-only JSONL file, not a database. Nothing here needs
+// full-text search, transactions or concurrent writers, and a plain file keeps
+// the binary at zero external dependencies - which is the whole distribution
+// story. Reach for a database when a feature actually needs one.
 package store
 
 import (
